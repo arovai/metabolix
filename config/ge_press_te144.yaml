@@ -1,0 +1,46 @@
+# Illustrative GE unedited PRESS TE 144 ms model profile, not a universal fit.
+processing:
+  coil_combine: auto
+  coil_reference: null
+  water_removal: "off"
+  water_ppm: [4.5, 4.9]
+basis:
+  path: /data/basis/LCModel_GE_UnEdited_PRESS_144_.BASIS
+  mapping: []
+  binary_dir: null
+fit:
+  ppmlim: [1.8, 4.0]
+  ignore: [H2O, CrCH2, Ala, Lac]
+  combine:
+    - [NAA, NAAG]
+    - [Cr, PCr]
+    - [GPC, PCh]
+    - [Glu, Gln]
+  internal_reference: [Cr, PCr]
+  baseline: "polynomial, 2"
+  algorithm: Newton
+  mask: null
+roi:
+  freesurfer_dir: /data/derivatives/freesurfer_7.3.2
+  map: null
+  labels:
+    left_thalamus: 10
+    right_thalamus: 49
+  sampling_step_mm: 0.5
+  minimum_overlap_percent: null
+execution:
+  n_jobs: 1
+  resume: false
+  overwrite: false
+qc:
+  max_crlb_percent: null
+  min_snr: null
+  max_linewidth_hz: null
+report:
+  enabled: true
+  metabolites: [NAA+NAAG, Cr+PCr, GPC+PCh, Glu+Gln]
+selection:
+  participant_label: []
+  session: []
+  acquisition: []
+  run: []
