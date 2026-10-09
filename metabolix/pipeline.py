@@ -14,6 +14,7 @@ from typing import Any
 
 import nibabel as nib
 import numpy as np
+import yaml
 
 from metabolix import __version__
 from metabolix.discovery import MRSInput, discover_mrs, output_identity
@@ -28,6 +29,8 @@ from metabolix.validation import (
     write_validity_mask,
 )
 from metabolix.config import dump_yaml
+from metabolix.output_layout import OutputLayout, bids_filename
+from metabolix.reporting import generate_report_figures
 
 
 def _entity_filters(config: dict[str, Any]) -> dict[str, list[str]]:
@@ -75,7 +78,7 @@ def _select_basis(item: MRSInput, metadata: dict[str, Any], config: dict[str, An
 
 
 def _run_directory(output_root: Path, item: MRSInput) -> Path:
-    return output_root / output_identity(item)
+    return OutputLayout(output_root, item).bundle_dir
 
 
 def _write_dataset_description(output_root: Path) -> None:
@@ -251,6 +254,73 @@ def _load_metric_maps(
     return metric_maps
 
 
+def _publish_fsl_maps(layout: OutputLayout, branch: str, fit_dir: Path) -> list[dict[str, str]]:
+    """Expose native FSL scalar maps as BIDS-named maps and report heatmap inputs."""
+    definitions = (
+        ("concs/raw", f"metabolix-{branch}-raw", "Raw fit scaling", "a.u."),
+        ("concs/internal", f"metabolix-{branch}-internal", "Internal-reference ratio", "relative units"),
+        ("uncertainties", f"metabolix-{branch}-crlb-percent", "CRLB-derived uncertainty", "percent"),
+        ("qc", f"metabolix-{branch}-qc", "Fit QC metric", "metric-specific units"),
+    )
+    layout.map_dir.mkdir(parents=True, exist_ok=True)
+    layout.figure_dir.mkdir(parents=True, exist_ok=True)
+    results = []
+    for source_folder, description, label, units in definitions:
+        source_dir = fit_dir / source_folder
+        if not source_dir.is_dir():
+            continue
+        for source in sorted(source_dir.glob("*.nii*")):
+            name = source.name.removesuffix(".nii.gz").removesuffix(".nii")
+            if source_folder == "uncertainties" and not name.endswith("_sd"):
+                continue
+            if source_folder == "qc" and not name.endswith(("_snr", "_fwhm")):
+                continue
+            if source_folder == "uncertainties":
+                name = name.removesuffix("_sd")
+                kind = "crlb"
+                map_description = description
+                title = f"{branch}: {label} {name}"
+                map_units = units
+            elif source_folder == "qc":
+                kind = "snr" if name.endswith("_snr") else "linewidth"
+                name = name.removesuffix("_snr").removesuffix("_fwhm")
+                map_description = f"{description}-{kind}"
+                title = f"{branch}: component {kind} {name}"
+                map_units = "component SNR metric" if kind == "snr" else "Hz"
+            else:
+                kind = "metabolite-map"
+                map_description = description
+                title = f"{branch}: {label} {name}"
+                map_units = units
+            metabolite = name.replace("+", "-").replace("_", "-")
+            desc = f"{map_description}-{metabolite}"
+            output = layout.map_dir / bids_filename(layout.item, desc, "statmap", ".nii.gz")
+            image = nib.load(str(source))
+            nib.save(image, str(output))
+            map_metadata = {
+                "Description": label,
+                "Metabolite": name,
+                "ProcessingBranch": branch,
+                "Scaling": source_folder.removeprefix("concs/"),
+                "Units": map_units,
+                "SourceMap": str(source),
+            }
+            output.with_name(output.name[:-7] + ".json").write_text(json.dumps(map_metadata, indent=2) + "\n")
+            # Concentration maps are heatmapped for immediate visual inspection; QC maps remain downloadable.
+            figure_path = layout.figure_dir / bids_filename(layout.item, f"{description}-{metabolite}-heatmap", "map", ".png")
+            results.append({
+                "path": str(output),
+                "figure_path": str(figure_path),
+                "title": title,
+                "branch": branch,
+                "scale": source_folder,
+                "metabolite": name,
+                "kind": kind,
+                "units": map_units,
+            })
+    return results
+
+
 def _write_qc_table(
     path: Path,
     item: MRSInput,
@@ -308,10 +378,11 @@ def _write_qc_table(
         "residual_l2_over_input_l2": "Euclidean norm of complex time-domain residual divided by complex input-FID norm; descriptive fit residual summary, not metabolite loss.",
         "qc_flags": "Operational threshold flags only; estimates are retained and never automatically rejected.",
     }
-    (path.parent / "voxel_qc_definitions.json").write_text(json.dumps(definitions, indent=2) + "\n")
+    definitions_path = path.with_name(path.name.replace("_voxelqc.tsv", "_voxelqc_definitions.json"))
+    definitions_path.write_text(json.dumps(definitions, indent=2) + "\n")
 
 
-def _write_branch_comparison(original: Path, waterremoved: Path, output_dir: Path) -> None:
+def _write_branch_comparison(original: Path, waterremoved: Path, output_dir: Path, item: MRSInput) -> tuple[Path, Path]:
     with original.open(newline="") as stream:
         original_rows = {(int(row["i"]), int(row["j"]), int(row["k"])): row for row in csv.DictReader(stream, delimiter="\t")}
     with waterremoved.open(newline="") as stream:
@@ -342,9 +413,9 @@ def _write_branch_comparison(original: Path, waterremoved: Path, output_dir: Pat
             if np.isfinite(delta):
                 means[field].append(delta)
         rows.append(row)
-    comparison_dir = original.parent.parent / "qc"
+    comparison_dir = output_dir / "qc"
     comparison_dir.mkdir(parents=True, exist_ok=True)
-    table = comparison_dir / "water_removal_paired_differences.tsv"
+    table = comparison_dir / bids_filename(item, "metabolix-waterRemovalComparison", "voxelqc", ".tsv")
     fields = list(rows[0]) if rows else ["i", "j", "k"]
     with table.open("w", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=fields, delimiter="\t")
@@ -358,82 +429,47 @@ def _write_branch_comparison(original: Path, waterremoved: Path, output_dir: Pat
         "mean_paired_difference": {key: float(np.mean(values)) if values else None for key, values in means.items()},
         "selection": "No branch is selected automatically from fit quality or uncertainty.",
     }
-    (comparison_dir / "water_removal_comparison.json").write_text(json.dumps(summary, indent=2) + "\n")
+    summary_path = comparison_dir / bids_filename(item, "metabolix-waterRemovalComparison", "summary", ".json")
+    summary_path.write_text(json.dumps(summary, indent=2) + "\n")
+    return table, summary_path
 
 
 def _write_report(
-    path: Path,
+    layout: OutputLayout,
     item: MRSInput,
     config: dict[str, Any],
     validated: Any,
     basis: Path,
     branches: list[str],
+    branch_qc_paths: dict[str, Path],
+    map_outputs: list[dict[str, str]],
+    figures: list[dict[str, str]],
     roi_summary: dict[str, Any] | None,
     warnings: list[str],
-) -> None:
-    total = int(validated.valid_voxels.size)
+    manifest: dict[str, Any],
+) -> tuple[Path, Path]:
+    report_md = layout.report_path(".md")
+    report_html = layout.report_path(".html")
     valid_count = int(validated.valid_voxels.sum())
-    lines = [
-        f"# Metabolix report: {item.source_name}",
-        "",
-        "Processing completed. This report documents software execution and QC; successful fitting does not establish validated metabolite measurements.",
-        "",
-        "## Input and model",
-        "",
-        f"- Source: `{item.path}`",
-        f"- Discovery convention: {'BIDS MRS' if item.standard_bids else 'legacy *_mrsi compatibility pattern'}",
-        f"- Shape: `{validated.image.shape}`; valid spatial voxels: {valid_count}/{total}",
-        f"- Basis: `{basis}` (sequence/model compatibility remains a scientific assumption)",
-        f"- Fitting branches: {', '.join(branches)}",
-        f"- Water removal mode: `{config['processing']['water_removal']}`; no branch is selected automatically.",
-        "- Estimates are not labelled as molar concentration. Internal-reference ratios require a valid nonzero reference.",
-        "- FSL-MRS's standard HTML report summarizes the average FID in the mask; it is not a summary of independent voxel fits.",
-        "",
-        "## QC and outputs",
-        "",
-        "The voxel QC TSV preserves every spatial coordinate. Input-invalid voxels are flagged and excluded from the fit mask. Numeric component metrics remain blank unless they can be read unambiguously from native FSL-MRS outputs; native output maps are retained in each fit directory.",
-        "",
-        "Uncertainty products named `*_sd` by the Newton fit are CRLB-derived percentage estimates, not absolute standard deviations, and may be capped. They are not automatically propagated uncertainties for metabolite/reference ratios.",
-        "",
-        "## Warnings",
-        "",
-    ]
-    lines.extend([f"- {warning}" for warning in warnings] or ["- None recorded by the application."])
-    lines.extend(
-        [
-            "",
-            "## Voxel-wise distributions",
-            "",
-            f"Reporting focus configured: {', '.join(config['report']['metabolites']) or 'all available fitted components'}.",
-            "The model fit is not restricted to this reporting list. Summary statistics below use finite values from voxels marked fit-completed.",
-            "",
-            "| Branch | Metric | N | Mean | SD | Median | P05 | P95 |",
-            "|---|---|---:|---:|---:|---:|---:|---:|",
-        ]
-    )
-    for branch in branches:
-        fit_folder = "03_fit_waterremoved" if branch == "waterremoved" else "03_fit_original"
-        qc_path = path.parent / fit_folder / "voxel_qc.tsv"
-        if not qc_path.is_file():
-            continue
+    total_count = int(validated.valid_voxels.size)
+    qc_rows: dict[str, list[dict[str, str]]] = {}
+    statistics: list[dict[str, Any]] = []
+    for branch, qc_path in branch_qc_paths.items():
         with qc_path.open(newline="") as stream:
-            qc_rows = list(csv.DictReader(stream, delimiter="\t"))
-        metric_fields = [
-            key for key in (qc_rows[0] if qc_rows else {})
-            if key.startswith(("raw_fit_", "internal_reference_ratio_", "crlb_percent_", "snr_", "linewidth_fwhm_hz_", "nuisance_"))
-            or key == "residual_l2_over_input_l2"
+            qc_rows[branch] = list(csv.DictReader(stream, delimiter="\t"))
+        rows = qc_rows[branch]
+        columns = list(rows[0]) if rows else []
+        selected = config["report"]["metabolites"]
+        metric_columns = [
+            column for column in columns
+            if column.startswith(("raw_fit_", "internal_reference_ratio_", "crlb_percent_", "snr_", "linewidth_fwhm_hz_"))
+            and (not selected or any(column.endswith(f"_{name}") for name in selected))
         ]
-        report_focus = config["report"]["metabolites"]
-        if report_focus:
-            metric_fields = [
-                key for key in metric_fields
-                if key.startswith(("nuisance_", "residual_l2_over_input_l2"))
-                or any(key.endswith(f"_{name}") for name in report_focus)
-            ]
-        completed_rows = [row for row in qc_rows if row.get("status") == "fit_completed"]
-        for metric in metric_fields:
+        for metric in metric_columns:
             values = []
-            for row in completed_rows:
+            for row in rows:
+                if row.get("status") != "fit_completed":
+                    continue
                 try:
                     value = float(row[metric])
                     if np.isfinite(value):
@@ -441,47 +477,219 @@ def _write_report(
                 except (KeyError, ValueError):
                     continue
             if values:
-                array = np.asarray(values, dtype=float)
-                lines.append(
-                    f"| {branch} | `{metric}` | {len(values)} | {array.mean():.5g} | {array.std(ddof=0):.5g} | "
-                    f"{np.median(array):.5g} | {np.percentile(array, 5):.5g} | {np.percentile(array, 95):.5g} |"
-                )
-        lines.extend(
-            [
-                "",
-                f"- Native voxel maps and individual fit, baseline, and residual FIDs: `{fit_folder}/` (open with FSLeyes or another NIfTI-MRS-aware viewer).",
-                f"- Paginated all-fitted-voxel spectral diagnostics: `{fit_folder}/voxel_diagnostics.pdf`.",
-                f"- Voxel table and metric definitions: `{fit_folder}/voxel_qc.tsv`, `{fit_folder}/voxel_qc_definitions.json`.",
-            ]
+                array = np.asarray(values)
+                statistics.append({
+                    "branch": branch,
+                    "metric": metric,
+                    "n": len(values),
+                    "mean": float(array.mean()),
+                    "sd": float(array.std(ddof=0)),
+                    "median": float(np.median(array)),
+                    "p05": float(np.percentile(array, 5)),
+                    "p95": float(np.percentile(array, 95)),
+                })
+
+    def rel(path: str | Path) -> str:
+        return Path(path).resolve().relative_to(layout.bundle_dir.resolve()).as_posix()
+
+    repro = {
+        "created": manifest.get("finished", manifest.get("created")),
+        "metabolix_version": manifest.get("metabolix_version", __version__),
+        "python_version": manifest.get("python_version"),
+        "fsl_mrs_version": manifest.get("fsl_mrs_version"),
+        "source": manifest.get("source"),
+        "source_sha256": manifest.get("source_sha256"),
+        "basis": str(basis),
+        "basis_sha256": manifest.get("basis_sha256"),
+        "basis_metadata": manifest.get("basis_metadata"),
+        "fingerprint": manifest.get("fingerprint"),
+        "commands": manifest.get("commands", []),
+    }
+    basis_metadata = manifest.get("basis_metadata") or {}
+    basis_facts = []
+    if basis_metadata:
+        basis_facts = [
+            f"Basis sampling: {basis_metadata.get('original_points', 'unknown')} points at "
+            f"{basis_metadata.get('original_bandwidth_hz', 'unknown')} Hz; fitted data formatted to "
+            f"{basis_metadata.get('target_points', 'unknown')} points at {basis_metadata.get('target_bandwidth_hz', 'unknown')} Hz.",
+            f"Basis frequency: {basis_metadata.get('central_frequency_mhz', 'unknown')} MHz; data frequency: "
+            f"{basis_metadata.get('data_central_frequency_mhz', 'unknown')} MHz "
+            f"(difference {basis_metadata.get('relative_frequency_difference_percent', 'unknown')}%).",
+            "Basis component names: " + ", ".join(basis_metadata.get("component_names", [])),
+            "Sequence/pulse-sequence equivalence is not verified by successful parsing or resampling.",
+        ]
+    config_text = yaml.safe_dump(config, sort_keys=False, allow_unicode=False)
+    qc_figures = [entry for entry in figures if entry["kind"] == "preprocessing-qc"]
+    basis_figures = [entry for entry in figures if entry["kind"] == "basis"]
+    map_figures = [entry for entry in figures if entry["kind"] == "metabolite-heatmap"]
+
+    md_lines = [
+        f"# Metabolix report: {layout.stem}",
+        "",
+        "> Processing/QC report. Successful fitting does not establish validated metabolite measurements.",
+        "",
+        "## Quick links",
+        "",
+        f"- [All voxel maps](maps/) and [voxel QC tables](qc/)",
+        f"- [Figures](figures/) and [native FSL-MRS products](processing/fsl-mrs/)",
+        f"- [Reproducibility/configuration records](provenance/)",
+        "",
+        "## Acquisition and fitting summary",
+        "",
+        f"- Source: `{item.path}` ({'standard BIDS MRS' if item.standard_bids else 'legacy *_mrsi compatibility layout'})",
+        f"- Spatial/spectral shape: `{validated.image.shape}`; valid voxels: {valid_count}/{total_count}",
+        f"- Basis: `{basis}` (sequence compatibility must be assessed independently)",
+        *[f"- {fact}" for fact in basis_facts],
+        f"- Fit branches: {', '.join(branches)}; water-removal mode: `{config['processing']['water_removal']}`",
+        f"- Report focus: {', '.join(config['report']['metabolites']) or 'all available metabolites'}; this does not restrict the fitted model.",
+        "- Internal-reference outputs are relative estimates, not molar concentrations. Raw fit values are arbitrary units.",
+        "",
+        "## Preprocessing QC figures",
+        "",
+    ]
+    for entry in qc_figures:
+        caption = entry["title"]
+        md_lines.append(f"### {caption}")
+        md_lines.append("")
+        md_lines.append(f"![{caption}]({rel(entry['path'])})")
+        md_lines.append("")
+    md_lines.extend(["## Basis figures", ""])
+    for entry in basis_figures:
+        md_lines.append(f"![{entry['title']}]({rel(entry['path'])})")
+        md_lines.append("")
+    md_lines.extend(["## Metabolite map heatmaps", ""])
+    for entry in map_figures:
+        md_lines.append(f"### {entry['title']}")
+        md_lines.append("")
+        md_lines.append(f"![{entry['title']}]({rel(entry['path'])})")
+        md_lines.append(f"[Download NIfTI map]({rel(entry['map_path'])})")
+        md_lines.append("")
+    md_lines.extend(["## Map files", ""])
+    for entry in map_outputs:
+        md_lines.append(f"- [{entry['title']}]({rel(entry['path'])})")
+    md_lines.append("")
+    md_lines.extend(["## All-voxel diagnostics", ""])
+    for entry in figures:
+        if entry["kind"] == "voxel-diagnostics":
+            md_lines.append(f"- [{entry['title']}]({rel(entry['path'])})")
+    md_lines.append("")
+    md_lines.extend(["## Voxel distributions", "", "| Branch | Metric | N | Mean | SD | Median | P05 | P95 |", "|---|---|---:|---:|---:|---:|---:|---:|"])
+    for row in statistics:
+        md_lines.append(
+            f"| {row['branch']} | `{row['metric']}` | {row['n']} | {row['mean']:.5g} | {row['sd']:.5g} | "
+            f"{row['median']:.5g} | {row['p05']:.5g} | {row['p95']:.5g} |"
         )
-    if len(branches) == 2 and (path.parent / "qc" / "water_removal_paired_differences.tsv").is_file():
-        lines.extend(
-            [
-                "",
-                "## Water-removal comparison",
-                "",
-                "Paired differences are water-removed minus original, voxel-matched; see `qc/water_removal_paired_differences.tsv` and `qc/water_removal_comparison.json`. No branch is selected automatically.",
-            ]
-        )
+    md_lines.extend(["", "## Warnings", ""])
+    md_lines.extend([f"- {warning}" for warning in warnings] or ["- None recorded."])
     if roi_summary:
-        lines.extend(
-            [
-                "",
-                "## Anatomical overlap",
-                "",
-                "ROI overlap is nominal geometric overlap from image-world affines. No registration was performed or validated. MRSI spatial response can spread signal beyond nominal voxel boundaries. Overlap did not restrict fitting.",
-                "",
-                f"Mean segmentation field-of-view coverage: {roi_summary['mean_segmentation_fov_coverage_pct']:.2f}%.",
-                "Overlap-weighted estimates, when available, are saved in `roi/roi_weighted_estimates.tsv`; they are not pure-ROI concentrations or fits of an averaged ROI spectrum.",
-            ]
+        md_lines.extend([
+            "", "## Anatomical overlap", "",
+            "Nominal overlap is computed from existing image-world affines; registration is not performed or validated. MRSI spatial response may extend beyond nominal voxel boundaries. ROI overlap does not restrict fitting.",
+            "", f"Mean segmentation field-of-view coverage: {roi_summary['mean_segmentation_fov_coverage_pct']:.2f}%.",
+            "Overlap-weighted estimates are descriptive voxel-weighted summaries, not pure-ROI concentrations or fits of an averaged ROI spectrum.",
+        ])
+    md_lines.extend(["", "## Reproducibility", "", "Full commands, checksums, software versions, resolved configuration, and processing status are in the linked provenance files.", ""])
+    report_md.parent.mkdir(parents=True, exist_ok=True)
+    report_md.write_text("\n".join(md_lines) + "\n")
+
+    quick_links = [
+        ("QC folder", "qc/"),
+        ("Map folder", "maps/"),
+        ("Figures", "figures/"),
+        ("Native FSL-MRS outputs", "processing/fsl-mrs/"),
+        ("Logs", "logs/"),
+        ("Provenance and resolved configuration", "provenance/"),
+    ]
+    link_html = " ".join(f'<a class="quick-link" href="{href}">{label}</a>' for label, href in quick_links)
+    qc_links = "".join(
+        f'<li><a href="{html.escape(rel(path))}">{html.escape(branch)} voxel QC table</a></li>'
+        for branch, path in branch_qc_paths.items()
+    )
+    map_links = "".join(
+        f'<li><a href="{html.escape(rel(entry["path"]))}">{html.escape(entry["title"])}</a></li>'
+        for entry in map_outputs
+    )
+    figure_html = []
+    for entry in qc_figures:
+        figure_html.append(
+            f'<figure><a href="{html.escape(rel(entry["path"]))}"><img loading="lazy" src="{html.escape(rel(entry["path"]))}" alt="{html.escape(entry["title"])}"></a>'
+            f'<figcaption>{html.escape(entry["title"])}</figcaption></figure>'
         )
-        for summary in roi_summary["roi_summaries"]:
-            lines.append(
-                f"- {summary['roi']}: {summary['estimated_volume_within_mrsi_grid_mm3']:.1f} mm^3 nominal overlap; "
-                f"{summary['roi_fraction_covered_by_mrsi_grid_pct']:.2f}% of label-map ROI volume lies within the MRS grid."
-            )
-    lines.append("")
-    path.write_text("\n".join(lines))
+    heatmap_html = []
+    for entry in map_figures:
+        heatmap_html.append(
+            f'<figure><a href="{html.escape(rel(entry["path"]))}"><img loading="lazy" src="{html.escape(rel(entry["path"]))}" alt="{html.escape(entry["title"])}"></a>'
+            f'<figcaption><a href="{html.escape(rel(entry["map_path"]))}">{html.escape(entry["title"])} map</a></figcaption></figure>'
+        )
+    voxel_pdf_html = "".join(
+        f'<li><a href="{html.escape(rel(entry["path"]))}">{html.escape(entry["title"])}</a></li>'
+        for entry in figures if entry["kind"] == "voxel-diagnostics"
+    )
+    comparison_html = ""
+    for path in manifest.get("water_removal_comparison", []):
+        comparison_html += f'<li><a href="{html.escape(rel(path))}">{html.escape(Path(path).name)}</a></li>'
+    stats_rows = "".join(
+        "<tr>" + "".join(f"<td>{html.escape(str(row[key]))}</td>" for key in ("branch", "metric", "n")) +
+        "".join(f"<td>{row[key]:.5g}</td>" for key in ("mean", "sd", "median", "p05", "p95")) + "</tr>"
+        for row in statistics
+    )
+    warning_html = "".join(f"<li>{html.escape(warning)}</li>" for warning in warnings) or "<li>None recorded.</li>"
+    roi_html = ""
+    if roi_summary:
+        roi_links = []
+        for label, key in (("Per-voxel overlap table", "overlap_table"), ("Overlap-weighted summaries", "weighted_estimates_table")):
+            if roi_summary.get(key):
+                roi_links.append(f'<li><a href="{html.escape(rel(roi_summary[key]))}">{label}</a></li>')
+        for roi_map in sorted(layout.roi_dir.glob("*_statmap.nii.gz")):
+            roi_links.append(f'<li><a href="{html.escape(rel(roi_map))}">{html.escape(roi_map.name)}</a></li>')
+        roi_html = (
+            "<section><h2>Anatomical overlap</h2><p>Nominal overlap from existing image-world affines; registration is not performed or validated. "
+            "MRSI spatial response may extend beyond nominal voxel boundaries. ROI overlap does not restrict fitting.</p>"
+            f"<p>Mean segmentation field-of-view coverage: {roi_summary['mean_segmentation_fov_coverage_pct']:.2f}%.</p>"
+            "<p>Overlap-weighted estimates are descriptive, not pure-ROI concentrations or fits of an averaged ROI spectrum.</p>"
+            f"<ul>{''.join(roi_links)}</ul></section>"
+        )
+    html_document = f'''<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Metabolix report {html.escape(layout.stem)}</title>
+<style>
+:root{{--ink:#192b32;--muted:#5b6b70;--line:#d8e0de;--wash:#f3f7f5;--accent:#176b68;--signal:#bd5b35}}
+*{{box-sizing:border-box}}body{{margin:0;color:var(--ink);font:15px/1.55 system-ui,sans-serif;background:white}}
+header{{padding:2rem clamp(1rem,4vw,4rem);background:var(--wash);border-bottom:1px solid var(--line)}}main{{max-width:1500px;margin:auto;padding:1rem clamp(1rem,4vw,4rem) 4rem}}
+h1{{font-size:1.8rem;margin:.15rem 0}}h2{{font-size:1.3rem;margin:2rem 0 .6rem}}h3{{font-size:1rem;margin:.5rem 0;color:var(--muted)}}p,.muted{{color:var(--muted)}}
+.notice{{border-left:4px solid var(--signal);padding:.8rem 1rem;background:#fff7f2}}.quick-link{{display:inline-block;margin:.25rem .35rem .25rem 0;padding:.45rem .7rem;border:1px solid var(--line);color:var(--accent);text-decoration:none;font-weight:650}}
+.facts{{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:.5rem 1.5rem;padding:1rem 0}}.facts div{{border-bottom:1px solid var(--line);padding:.5rem 0}}.facts b{{display:block;font-size:.78rem;text-transform:uppercase;color:var(--muted)}}
+.gallery{{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,390px),1fr));gap:1rem}}figure{{margin:0;border:1px solid var(--line);background:white}}figure img{{display:block;width:100%;height:auto}}figcaption{{padding:.65rem .8rem;color:var(--muted)}}
+.maps{{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr));gap:.75rem}}.maps figure{{font-size:.9rem}}
+table{{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums;display:block;overflow-x:auto}}th,td{{text-align:left;border-bottom:1px solid var(--line);padding:.45rem .6rem;white-space:nowrap}}th{{background:var(--wash)}}
+details{{margin:1rem 0;border:1px solid var(--line);padding:.8rem}}pre{{white-space:pre-wrap;overflow-wrap:anywhere;background:#f6f8f7;padding:1rem;max-height:34rem;overflow:auto}}
+@media(max-width:600px){{header{{padding:1.25rem 1rem}}main{{padding:0 1rem 2rem}}h1{{font-size:1.4rem}}}}
+</style></head><body>
+<header><p class="muted">METABOLIX / MRS DERIVATIVE QC</p><h1>{html.escape(layout.stem)}</h1>
+<p class="notice">Processing completion is not evidence of validated metabolite measurements. Interpret spectral QC, fit uncertainty, anatomical overlap, and quantification units separately.</p>
+{link_html}</header><main>
+<section><h2>Acquisition and fitting</h2><div class="facts">
+<div><b>Source</b>{html.escape(str(item.path))}</div><div><b>Discovery</b>{'Standard BIDS MRS' if item.standard_bids else 'Legacy *_mrsi compatibility layout'}</div>
+<div><b>Shape</b>{html.escape(str(validated.image.shape))}</div><div><b>Valid spatial voxels</b>{valid_count} / {total_count}</div>
+<div><b>Basis</b>{html.escape(basis.name)}</div><div><b>Branches</b>{html.escape(', '.join(branches))}</div>
+<div><b>Water removal</b>{html.escape(config['processing']['water_removal'])}</div><div><b>Reporting focus</b>{html.escape(', '.join(config['report']['metabolites']) or 'all fitted components')}</div>
+</div><p>Reporting focus changes report emphasis only; it does not remove model components. FSL-MRS internal values are relative estimates. Raw fit scaling is arbitrary and is not a molar concentration.</p></section>
+<section><h2>Preprocessing and spectral QC</h2><p>Curves summarize voxel/coil magnitude spectra with the 10th-90th percentile band. The time-domain panel shows mean FID magnitude, not a coherent complex mean across spatial voxels.</p><div class="gallery">{''.join(figure_html)}</div></section>
+<section><h3>All-voxel fit diagnostics</h3><p>Each PDF contains every fitted voxel's spectrum, fit, baseline, and residual, paginated for browsing.</p><ul>{voxel_pdf_html}</ul></section>
+<section><h2>Basis used</h2><p>{html.escape('; '.join(basis_facts))}</p><p>The normalized component spectra are shown for inspection; their presence does not establish sequence equivalence or quantitative validity.</p><div class="gallery">{''.join(f'<figure><a href="{html.escape(rel(entry["path"]))}"><img loading="lazy" src="{html.escape(rel(entry["path"]))}" alt="{html.escape(entry["title"])}"></a><figcaption>{html.escape(entry["title"])}</figcaption></figure>' for entry in figures if "basis" in entry["kind"])}</div></section>
+<section><h2>Metabolite maps</h2><p>Heatmaps and downloadable NIfTI maps use the BIDS entity prefix. Review the scale and units in each map filename/report entry.</p><div class="maps">{''.join(heatmap_html)}</div></section>
+<section><h3>Downloadable NIfTI maps</h3><ul>{map_links}</ul></section>
+<section><h2>Voxel QC tables</h2><ul>{qc_links}</ul></section>
+{('<section><h2>Water-removal comparison</h2><p>Paired differences are water-removed minus original. No branch is selected automatically.</p><ul>' + comparison_html + '</ul></section>') if comparison_html else ''}
+<section><h2>Voxel-wise distributions</h2><table><thead><tr><th>Branch</th><th>Metric</th><th>N</th><th>Mean</th><th>SD</th><th>Median</th><th>P05</th><th>P95</th></tr></thead><tbody>{stats_rows}</tbody></table></section>
+{roi_html}
+<section><h2>Processing warnings</h2><ul>{warning_html}</ul></section>
+<section><h2>Reproducibility</h2><p>Full per-stage provenance, checksums, resolved configuration, and exact command argument arrays are available in <a href="provenance/">provenance/</a>. Native FSL outputs and process logs are retained under <a href="processing/fsl-mrs/">processing/fsl-mrs/</a> and <a href="logs/">logs/</a>.</p>
+<details><summary>Configuration summary</summary><pre>{html.escape(config_text)}</pre></details>
+<details><summary>Run provenance summary</summary><pre>{html.escape(json.dumps(repro, indent=2, default=str))}</pre></details></section>
+</main></body></html>'''
+    report_html.write_text(html_document + "\n")
+    return report_md, report_html
 
 
 def _add_roi_columns(qc_path: Path, roi_path: Path) -> None:
@@ -505,8 +713,8 @@ def _add_roi_columns(qc_path: Path, roi_path: Path) -> None:
         writer.writerows(rows)
 
 
-def _write_roi_weighted_estimates(run_dir: Path, branches: list[str], config: dict[str, Any]) -> None:
-    overlap_path = run_dir / "roi" / "voxel_overlap.tsv"
+def _write_roi_weighted_estimates(layout: OutputLayout, branches: list[str], config: dict[str, Any]) -> Path:
+    overlap_path = layout.roi_dir / bids_filename(layout.item, "metabolix-roi-overlap", "voxelqc", ".tsv")
     with overlap_path.open(newline="") as stream:
         overlap = {
             (int(row["i"]), int(row["j"]), int(row["k"])): row
@@ -516,8 +724,7 @@ def _write_roi_weighted_estimates(run_dir: Path, branches: list[str], config: di
     roi_columns = [key for key in next(iter(overlap.values()), {}) if key.endswith("_overlap_pct")]
     rows = []
     for branch in branches:
-        fit_folder = "03_fit_waterremoved" if branch == "waterremoved" else "03_fit_original"
-        with (run_dir / fit_folder / "voxel_qc.tsv").open(newline="") as stream:
+        with layout.branch_qc_table(branch).open(newline="") as stream:
             voxel_rows = list(csv.DictReader(stream, delimiter="\t"))
         if not voxel_rows:
             continue
@@ -555,10 +762,12 @@ def _write_roi_weighted_estimates(run_dir: Path, branches: list[str], config: di
                     }
                 )
     fields = ["branch", "roi", "metric", "overlap_weighted_voxel_estimate", "weighted_voxel_count", "minimum_overlap_threshold_percent", "interpretation"]
-    with (run_dir / "roi" / "roi_weighted_estimates.tsv").open("w", newline="") as stream:
+    output_path = layout.roi_dir / bids_filename(layout.item, "metabolix-roi-weighted", "summary", ".tsv")
+    with output_path.open("w", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=fields, delimiter="\t")
         writer.writeheader()
         writer.writerows(rows)
+    return output_path
 
 
 def _process_one(
@@ -570,6 +779,7 @@ def _process_one(
     logger: logging.Logger,
 ) -> None:
     validated = validate_mrs(item, logger)
+    layout = OutputLayout(output_root, item)
     basis = _select_basis(item, validated.metadata, config)
     if basis is None and not dry_run:
         raise ValueError(
@@ -661,31 +871,31 @@ def _process_one(
     if dry_run:
         logger.info("DRY RUN input %s entities=%s shape=%s basis=%s", item.path, item.entities, validated.image.shape, basis or "UNRESOLVED")
         logger.info("Requested spatial coverage: all %d valid voxels; water removal=%s", int(validated.valid_voxels.sum()), config["processing"]["water_removal"])
-        run_dir = _run_directory(output_root, item)
-        clean_input = run_dir / "00_work" / f"{item.source_name}_finite.nii.gz"
+        run_dir = layout.bundle_dir
+        clean_input = layout.work_dir / bids_filename(item, "metabolix-validInput", "mrs", ".nii.gz")
         planned_input = clean_input
         coil_mode = config["processing"]["coil_combine"]
         if validated.coil_dimension is not None and coil_mode in {"auto", "on"}:
-            output_name = f"{item.source_name}_desc-coilcombined_mrsi"
-            planned_input = run_dir / "01_coilcombine" / f"{output_name}.nii.gz"
+            output_name = f"{layout.stem}_desc-coilcombined_mrs"
+            planned_input = layout.stage_dir("coilcombine") / f"{output_name}.nii.gz"
             logger.info(
                 "DRY RUN argv: %s",
-                json.dumps([find_executable("fsl_mrs_proc", config["basis"].get("binary_dir")) or "fsl_mrs_proc", "coilcombine", "--file", str(clean_input), *(["--reference", str(coil_reference_path)] if coil_reference_path else []), "--output", str(run_dir / "01_coilcombine"), "--filename", output_name, "--generateReports"]),
+                json.dumps([find_executable("fsl_mrs_proc", config["basis"].get("binary_dir")) or "fsl_mrs_proc", "coilcombine", "--file", str(clean_input), *( ["--reference", str(coil_reference_path)] if coil_reference_path else [] ), "--output", str(layout.stage_dir("coilcombine")), "--filename", output_name, "--generateReports"]),
             )
         water_mode = config["processing"]["water_removal"]
         fit_inputs = {"original": planned_input}
         if water_mode in {"on", "compare"}:
-            output_name = f"{item.source_name}_desc-waterremoved_mrsi"
-            water_input = run_dir / "02_waterremove" / f"{output_name}.nii.gz"
+            output_name = f"{layout.stem}_desc-waterremoved_mrs"
+            water_input = layout.stage_dir("waterremove") / f"{output_name}.nii.gz"
             logger.info(
                 "DRY RUN argv: %s",
-                json.dumps([find_executable("fsl_mrs_proc", config["basis"].get("binary_dir")) or "fsl_mrs_proc", "remove", "--file", str(planned_input), "--ppm", *map(str, config["processing"]["water_ppm"]), "--output", str(run_dir / "02_waterremove"), "--filename", output_name, "--generateReports"]),
+                json.dumps([find_executable("fsl_mrs_proc", config["basis"].get("binary_dir")) or "fsl_mrs_proc", "remove", "--file", str(planned_input), "--ppm", *map(str, config["processing"]["water_ppm"]), "--output", str(layout.stage_dir("waterremove")), "--filename", output_name, "--generateReports"]),
             )
             fit_inputs = {"waterremoved": water_input} if water_mode == "on" else {"original": planned_input, "waterremoved": water_input}
         if basis is not None and fsl_mrsi:
-            planned_mask = run_dir / "00_work" / f"{item.source_name}_valid_mask.nii.gz"
+            planned_mask = layout.work_dir / bids_filename(item, "metabolix-fitMask", "mask", ".nii.gz")
             for branch, data_path in fit_inputs.items():
-                fit_dir = run_dir / ("03_fit_waterremoved" if branch == "waterremoved" else "03_fit_original")
+                fit_dir = layout.branch_dir(branch)
                 logger.info("DRY RUN argv: %s", json.dumps(_fit_command(fsl_mrsi, data_path, basis, planned_mask, fit_dir, config)))
         if basis_metadata:
             logger.info("DRY RUN basis metadata: %s", json.dumps(basis_metadata, sort_keys=True))
@@ -693,8 +903,8 @@ def _process_one(
     assert basis is not None
     fsl_version = executable_version("fsl_mrsi", config["basis"].get("binary_dir"))
     fingerprint = _fingerprint(item, basis, config, fsl_version)
-    run_dir = _run_directory(output_root, item)
-    manifest_path = run_dir / "manifest.json"
+    run_dir = layout.bundle_dir
+    manifest_path = layout.manifest_path()
     resume_manifest = None
     if run_dir.exists():
         if config["execution"]["resume"] and manifest_path.exists():
@@ -714,11 +924,13 @@ def _process_one(
         else:
             shutil.rmtree(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
-    log_path = run_dir / "processing.log"
+    layout.provenance_dir.mkdir(parents=True, exist_ok=True)
+    layout.log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = layout.log_path()
     handler = logging.FileHandler(log_path, mode="a" if resume_manifest else "w")
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     logger.addHandler(handler)
-    dump_yaml(config, run_dir / "config_resolved.yaml")
+    dump_yaml(config, layout.config_path())
     _write_dataset_description(output_root)
     manifest: dict[str, Any] = resume_manifest or {
         "status": "running",
@@ -764,12 +976,13 @@ def _process_one(
 
     save_manifest(manifest_path, manifest)
     if basis_metadata:
-        (run_dir / "basis_metadata.json").write_text(json.dumps(basis_metadata, indent=2) + "\n")
+        (layout.provenance_dir / bids_filename(item, "metabolix-basis", "metadata", ".json")).write_text(json.dumps(basis_metadata, indent=2) + "\n")
     try:
-        work = run_dir / "00_work"
-        clean_input = work / f"{item.source_name}_finite.nii.gz"
+        work = layout.work_dir
+        work.mkdir(parents=True, exist_ok=True)
+        clean_input = work / bids_filename(item, "metabolix-validInput", "mrs", ".nii.gz")
         prepare_finite_copy(validated, clean_input)
-        mask = work / f"{item.source_name}_valid_mask.nii.gz"
+        mask = work / bids_filename(item, "metabolix-fitMask", "mask", ".nii.gz")
         fit_mask = validated.valid_voxels.copy()
         if config["fit"].get("mask"):
             assert explicit_mask is not None
@@ -787,16 +1000,17 @@ def _process_one(
         if coil_mode == "on" and not has_coils:
             logger.warning("coil_combine is on but input has no tagged coil dimension; using the input unchanged.")
         if do_coil:
-            stage = run_dir / "01_coilcombine"
-            stem = f"{item.source_name}_desc-coilcombined_mrsi"
+            stage = layout.stage_dir("coilcombine")
+            stem = f"{layout.stem}_desc-coilcombined_mrs"
             if "coilcombine" not in completed_stages:
                 if stage.exists():
                     shutil.rmtree(stage)
+                stage.parent.mkdir(parents=True, exist_ok=True)
                 argv = [_resolve_fsl("fsl_mrs_proc", config), "coilcombine", "--file", str(clean_input)]
                 if coil_reference_path:
                     argv.extend(["--reference", str(coil_reference_path)])
                 argv.extend(["--output", str(stage), "--filename", stem, "--generateReports"])
-                command_record = run_command(argv, stage, "coilcombine", logger)
+                command_record = run_command(argv, stage, "coilcombine", logger, log_dir=layout.log_dir, log_stem=layout.stem)
                 record_stage("coilcombine", command_record)
                 require_success("coilcombine", command_record)
                 for warning in command_record.get("warnings", []):
@@ -813,13 +1027,14 @@ def _process_one(
         branches: dict[str, Path] = {}
         water_mode = config["processing"]["water_removal"]
         if water_mode in {"on", "compare"}:
-            stage = run_dir / "02_waterremove"
-            stem = f"{item.source_name}_desc-waterremoved_mrsi"
+            stage = layout.stage_dir("waterremove")
+            stem = f"{layout.stem}_desc-waterremoved_mrs"
             if "waterremove" not in completed_stages:
                 if stage.exists():
                     shutil.rmtree(stage)
+                stage.parent.mkdir(parents=True, exist_ok=True)
                 argv = [_resolve_fsl("fsl_mrs_proc", config), "remove", "--file", str(processed_input), "--ppm", *map(str, config["processing"]["water_ppm"]), "--output", str(stage), "--filename", stem, "--generateReports"]
-                command_record = run_command(argv, stage, "waterremove", logger)
+                command_record = run_command(argv, stage, "waterremove", logger, log_dir=layout.log_dir, log_stem=layout.stem)
                 record_stage("waterremove", command_record)
                 require_success("waterremove", command_record)
             else:
@@ -835,28 +1050,39 @@ def _process_one(
             branches["original"] = processed_input
 
         fit_executable = _resolve_fsl("fsl_mrsi", config)
+        branch_qc_paths: dict[str, Path] = {}
+        map_outputs: list[dict[str, str]] = []
+        diagnostic_paths: dict[str, Path] = {}
         for branch, data_path in branches.items():
-            stage = run_dir / ("03_fit_waterremoved" if branch == "waterremoved" else "03_fit_original")
+            stage = layout.branch_dir(branch)
             stage_name = f"fit_{branch}"
             if stage_name not in completed_stages:
                 if stage.exists():
                     shutil.rmtree(stage)
+                stage.parent.mkdir(parents=True, exist_ok=True)
                 argv = _fit_command(fit_executable, data_path, basis, mask, stage, config)
-                command_record = run_command(argv, stage, stage_name, logger)
+                command_record = run_command(argv, stage, stage_name, logger, log_dir=layout.log_dir, log_stem=layout.stem)
                 record_stage(stage_name, command_record)
                 require_success(stage_name, command_record)
                 fit_reasons = validated.invalid_reasons.copy()
                 fit_reasons[validated.valid_voxels & ~fit_mask] = "outside_fit_mask"
                 metric_maps = _load_metric_maps(stage, tuple(validated.image.shape[:3]), data_path, config, logger)
-                _write_qc_table(stage / "voxel_qc.tsv", item, fit_mask, fit_reasons, branch, "fit_completed", metric_maps, config)
-            elif not (stage / "voxel_qc.tsv").is_file():
-                raise ValueError(f"Manifest marks {stage_name} complete but its voxel QC table is missing.")
+                qc_path = layout.branch_qc_table(branch)
+                _write_qc_table(qc_path, item, fit_mask, fit_reasons, branch, "fit_completed", metric_maps, config)
+            else:
+                qc_path = layout.branch_qc_table(branch)
+                if not qc_path.is_file():
+                    raise ValueError(f"Manifest marks {stage_name} complete but its BIDS-named voxel QC table is missing.")
+            branch_qc_paths[branch] = qc_path
+            map_outputs.extend(_publish_fsl_maps(layout, branch, stage))
             fsl_mrsi_runtime = find_executable("fsl_mrsi", config["basis"].get("binary_dir"))
-            if fsl_mrsi_runtime and not (stage / "voxel_diagnostics.pdf").is_file():
+            diagnostic_pdf = layout.figure_dir / bids_filename(item, f"metabolix-{branch}-voxelDiagnostics", "report", ".pdf")
+            diagnostic_paths[branch] = diagnostic_pdf
+            if fsl_mrsi_runtime and not diagnostic_pdf.is_file():
                 make_voxel_diagnostic_pdf(
                     data_path,
                     stage,
-                    stage / "voxel_diagnostics.pdf",
+                    diagnostic_pdf,
                     mask,
                     validated.metadata,
                     fsl_mrsi_runtime,
@@ -866,34 +1092,69 @@ def _process_one(
         if config["roi"].get("freesurfer_dir") or config["roi"].get("map"):
             roi_report = calculate_roi_overlap(item, validated, run_dir, config, logger)
             for branch in branches:
-                fit_dir = run_dir / ("03_fit_waterremoved" if branch == "waterremoved" else "03_fit_original")
-                _add_roi_columns(fit_dir / "voxel_qc.tsv", run_dir / "roi" / "voxel_overlap.tsv")
-            _write_roi_weighted_estimates(run_dir, list(branches), config)
+                _add_roi_columns(branch_qc_paths[branch], Path(roi_report["overlap_table"]))
+            roi_report["weighted_estimates_table"] = str(_write_roi_weighted_estimates(layout, list(branches), config))
             if config["roi"].get("minimum_overlap_percent") is not None:
                 threshold = float(config["roi"]["minimum_overlap_percent"])
                 manifest["warnings"].append(f"ROI summary threshold {threshold:g}% is reporting-only and did not restrict fitting.")
 
         if "original" in branches and "waterremoved" in branches:
-            _write_branch_comparison(
-                run_dir / "03_fit_original" / "voxel_qc.tsv",
-                run_dir / "03_fit_waterremoved" / "voxel_qc.tsv",
+            comparison_paths = _write_branch_comparison(
+                branch_qc_paths["original"],
+                branch_qc_paths["waterremoved"],
                 run_dir,
+                item,
             )
+            manifest["water_removal_comparison"] = [str(path) for path in comparison_paths]
 
-        report_path = run_dir / "report.md"
-        _write_report(report_path, item, config, validated, basis, list(branches), roi_report, manifest["warnings"])
-        links = []
-        for branch in branches:
-            fit_folder = "03_fit_waterremoved" if branch == "waterremoved" else "03_fit_original"
-            links.append(f'<li><a href="{fit_folder}/voxel_diagnostics.pdf">{html.escape(branch)} voxel diagnostics (PDF)</a></li>')
-        report_html = (
-            "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-            "<title>Metabolix report</title><style>body{font:16px/1.5 sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem;color:#222}"
-            "pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f5f5f2;padding:1rem;border-left:4px solid #41616a}</style><body>"
-            f"<h1>Metabolix report: {html.escape(item.source_name)}</h1><h2>Voxel diagnostics</h2><ul>{''.join(links)}</ul>"
-            f"<pre>{html.escape(report_path.read_text())}</pre></body></html>\n"
+        spectral_inputs = {}
+        if validated.coil_dimension is not None and do_coil:
+            spectral_inputs["Before coil combination"] = str(item.path)
+            spectral_inputs["After coil combination"] = str(processed_input)
+        else:
+            spectral_inputs["Input / fitting data"] = str(processed_input)
+        if water_mode in {"on", "compare"}:
+            spectral_inputs["Before water removal"] = str(processed_input)
+            spectral_inputs["After water removal"] = str(next(path for name, path in branches.items() if name == "waterremoved"))
+        figures = []
+        fsl_mrsi_runtime = find_executable("fsl_mrsi", config["basis"].get("binary_dir"))
+        if fsl_mrsi_runtime:
+            try:
+                heatmap_candidates = [entry for entry in map_outputs if entry["scale"] == "concs/internal"]
+                if not heatmap_candidates:
+                    heatmap_candidates = [entry for entry in map_outputs if entry["scale"] == "concs/raw"]
+                figures = generate_report_figures(
+                    item,
+                    layout.figure_dir,
+                    layout.work_dir,
+                    fsl_mrsi_runtime,
+                    validated.metadata,
+                    spectral_inputs,
+                    str(basis),
+                    heatmap_candidates,
+                )
+            except Exception as exc:
+                warning = f"Application QC figure generation failed: {exc}"
+                manifest["warnings"].append(warning)
+                logger.warning(warning)
+        for branch, path in diagnostic_paths.items():
+            if path.is_file():
+                figures.append({"path": str(path), "title": f"{branch} all-voxel fit diagnostics", "kind": "voxel-diagnostics"})
+        report_md, report_html = _write_report(
+            layout,
+            item,
+            config,
+            validated,
+            basis,
+            list(branches),
+            branch_qc_paths,
+            map_outputs,
+            figures,
+            roi_report,
+            manifest["warnings"],
+            manifest,
         )
-        (run_dir / "report.html").write_text(report_html)
+        manifest["reports"] = {"html": str(report_html), "markdown": str(report_md)}
         manifest["commands"] = commands
         manifest["status"] = "completed"
         manifest["finished"] = datetime.now(timezone.utc).isoformat()
@@ -942,9 +1203,12 @@ def run_participant(
 
 def run_group(output_dir: Path, config: dict[str, Any], dry_run: bool, logger: logging.Logger) -> int:
     derivative_root = output_dir
-    tables = sorted(derivative_root.rglob("voxel_qc.tsv"))
+    tables = sorted(
+        path for path in derivative_root.rglob("*_voxelqc.tsv")
+        if "waterRemovalComparison" not in path.name
+    )
     if not tables:
-        raise ValueError(f"No participant voxel_qc.tsv tables found under {derivative_root}.")
+        raise ValueError(f"No BIDS-named *_voxelqc.tsv participant tables found under {derivative_root}.")
     if dry_run:
         logger.info("DRY RUN group aggregation: %d participant/run table(s) found.", len(tables))
         return 0

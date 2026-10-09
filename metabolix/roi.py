@@ -12,6 +12,7 @@ import nibabel as nib
 import numpy as np
 
 from metabolix.discovery import MRSInput
+from metabolix.output_layout import bids_filename
 from metabolix.validation import ValidatedInput
 
 
@@ -119,10 +120,27 @@ def calculate_roi_overlap(
             row[f"{name}_sampling_difference_pp"] = abs(float(fine[name][voxel] - coarse[name][voxel])) * 100
         rows.append(row)
     columns = list(rows[0])
-    with (roi_dir / "voxel_overlap.tsv").open("w", newline="") as stream:
+    overlap_table = roi_dir / bids_filename(item, "metabolix-roi-overlap", "voxelqc", ".tsv")
+    with overlap_table.open("w", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=columns, delimiter="\t")
         writer.writeheader()
         writer.writerows(rows)
+    overlap_table.with_suffix(".json").write_text(
+        json.dumps(
+            {
+                "Description": "Nominal per-MRS-voxel ROI overlap fractions and segmentation field-of-view coverage.",
+                "Denominator": "Entire nominal MRS voxel volume.",
+                "SamplingStepMM": step,
+                "SensitivityComparisonStepMM": 1.0,
+                "Coordinates": "Zero-based MRS spatial voxel indices.",
+                "Registration": "No registration performed; existing image-world affines are assumed aligned.",
+                "Labels": labels,
+                "MRSIResponse": "Finite spatial response may extend beyond nominal voxel boundaries.",
+            },
+            indent=2,
+        )
+        + "\n"
+    )
     summaries = []
     for name, label in labels.items():
         volume = int(np.count_nonzero(seg == label)) * seg_voxel_volume
@@ -144,9 +162,17 @@ def calculate_roi_overlap(
         )
         map_image = nib.Nifti1Image((fine[name] * 100).astype(np.float32), affine)
         map_image.header.set_xyzt_units("mm")
-        nib.save(map_image, str(roi_dir / f"desc-{name}_overlap_pct.nii.gz"))
+        map_path = roi_dir / bids_filename(item, f"metabolix-roi-{name}-overlapPercent", "statmap", ".nii.gz")
+        nib.save(map_image, str(map_path))
+        map_path.with_name(map_path.name[:-7] + ".json").write_text(
+            json.dumps({"Description": f"Nominal overlap percentage for ROI {name}.", "Units": "percent", "ROIlabel": label, "Denominator": "Entire nominal MRS voxel volume."}, indent=2) + "\n"
+        )
     fov_image = nib.Nifti1Image((fov * 100).astype(np.float32), affine)
-    nib.save(fov_image, str(roi_dir / "desc-segmentationFOV_coverage_pct.nii.gz"))
+    fov_path = roi_dir / bids_filename(item, "metabolix-roi-segmentationFOVCoverage", "statmap", ".nii.gz")
+    nib.save(fov_image, str(fov_path))
+    fov_path.with_name(fov_path.name[:-7] + ".json").write_text(
+        json.dumps({"Description": "Fraction of each nominal MRS voxel covered by the segmentation image field of view.", "Units": "percent"}, indent=2) + "\n"
+    )
     report = {
         "segmentation": str(seg_path),
         "labels": labels,
@@ -161,6 +187,7 @@ def calculate_roi_overlap(
         "interpretation": "Nominal geometric overlap only; MRSI spatial response may extend beyond nominal voxel boundaries.",
         "roi_summaries": summaries,
     }
-    (roi_dir / "roi_summary.json").write_text(json.dumps(report, indent=2) + "\n")
+    report["overlap_table"] = str(overlap_table)
+    (roi_dir / bids_filename(item, "metabolix-roi", "summary", ".json")).write_text(json.dumps(report, indent=2) + "\n")
     logger.info("Wrote nominal ROI overlap for %s to %s", item.source_name, roi_dir)
     return report

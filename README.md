@@ -99,7 +99,24 @@ The report metabolite list controls which metabolite maps are summarized in repo
 
 Primary input is already-converted image-space complex NIfTI-MRS under BIDS `sub-*/[ses-*/]mrs/*_mrs.nii[.gz]` with metadata. The documented compatibility pattern `sub-*/mrs/sub-*_mrsi.nii[.gz]` supports the supplied dataset, but does not claim full BIDS conformance. K-space and unsupported higher dimensions are rejected. Dynamic/editing dimensions are not silently averaged.
 
-The positional `OUTPUT_DIR` is the derivative dataset root and contains `dataset_description.json`, subject/session/source-specific folders, processing stages, resolved configuration, manifest, logs, branch-specific voxel QC tables, optional ROI overlap maps/tables, `report.md`/`report.html`, and paginated `voxel_diagnostics.pdf` files for all fitted voxels. Native FSL-MRS outputs are retained. Group summary is `OUTPUT_DIR/group/group_summary.tsv`.
+The positional `OUTPUT_DIR` is the derivative dataset root. Participant products follow `sub-*/[ses-*/]mrs/`; each acquisition has an entity-named `*_desc-metabolix/` bundle. The report is named `sub-..._desc-metabolix_report.html` (with a matching Markdown report). Downloadable metabolite/QC maps are BIDS-named `*_statmap.nii.gz` files with JSON sidecars; branch voxel tables use `*_voxelqc.tsv`. Detailed material is grouped into `figures/`, `maps/`, `qc/`, `roi/`, `logs/`, `provenance/`, `work/`, and `processing/fsl-mrs/`. Native FSL-MRS outputs are retained. Group summary is `OUTPUT_DIR/group/group_summary.tsv`.
+
+Typical layout:
+
+```text
+OUTPUT_DIR/
+  dataset_description.json
+  sub-11/[ses-01/]mrs/
+    sub-11[_ses-01][_task-...][_acq-...][_run-...]_desc-metabolix/
+      sub-11[_ses-01][_task-...][_acq-...][_run-...]_desc-metabolix_report.html
+      figures/       preprocessing QC, basis and per-metabolite heatmaps
+	maps/          BIDS-named raw/internal/QC NIfTI statmaps and JSON sidecars
+      qc/            branch voxel tables and paired comparison tables
+	processing/fsl-mrs/  native FSL-MRS products by branch/stage
+      roi/ logs/ provenance/ work/
+```
+
+The optional bracketed entities appear only when present in the input; MRS-specific `voi` and `nuc` entities are retained too. The report's first sections provide links to QC tables, downloadable raw/internal/QC maps, figures, native outputs, logs and provenance. Heatmaps emphasize the internally referenced maps when available; the detailed map directory retains all published scales and component QC maps.
 
 ROI overlap uses scanner/world affines, fine sampling at <=0.5 mm with a 1 mm sensitivity comparison, whole-MRS-voxel denominator, and separate segmentation field-of-view coverage. It never restricts the default fit mask. Existing header alignment is assumed, not validated registration.
 

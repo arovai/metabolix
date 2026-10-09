@@ -69,26 +69,25 @@ FSL command arguments must be safe arrays, never shell interpolation. Support pa
 
 ## 6. Output Specifications
 
-Suggested layout:
+Output layout follows the BIDS subject/session/modality hierarchy. Each acquisition is grouped in an entity-stem bundle so the main derivative files remain fully named and optional detail stays navigable:
 
 ```text
 OUTPUT_DIR/
   dataset_description.json
-  sub-XX/[ses-YY/]<acquisition-specific-run>/
-    config_resolved.yaml
-    manifest.json
-    processing.log
-    01_coilcombine/...
-    02_waterremove/...
-    03_fit_original/...
-    03_fit_waterremoved/...
-    03_fit_*/voxel_qc.tsv, voxel_qc_definitions.json
-    qc/water_removal_paired_differences.tsv (compare mode)
-    roi/voxel_overlap.tsv, overlap maps, roi_summary.tsv
-    report.md, report.html, voxel_diagnostics.pdf
+  sub-XX/[ses-YY/]/mrs/<entity-stem>_desc-metabolix/
+    sub-XX[_ses-YY][_task-...][_acq-...][_ce-...][_rec-...][_dir-...][_run-...][_echo-...][_part-...][_voi-...][_nuc-...][_space-...]_desc-metabolix_report.html/.md
+    figures/<BIDS-named preprocessing, basis, map heatmaps, voxel diagnostics>
+    maps/<BIDS-named *_statmap.nii.gz and JSON sidecars>
+    qc/<BIDS-named branch voxelqc tables and comparisons>
+    roi/<BIDS-named overlap tables/maps and weighted summaries>
+    logs/<BIDS-named application and subprocess logs>
+    provenance/<BIDS-named manifest, config and basis metadata>
+    processing/fsl-mrs/<coilcombine, water-removal, fit-original, fit-waterremoved>
+    work/<validated input copy and fit mask>
   group/group_summary.tsv
-  logs/
-```
+  ```
+
+The HTML report must directly link outputs by role, show pre/post coil-combination QC, mean voxel-wise spectral magnitude and mean FID magnitude, before/after water-removal QC when used, basis component plots, per-metabolite internal-reference heatmaps, configuration and reproducibility details, and warning/interpretation notes. Native FSL output remains in its detailed branch folder; downloadable scalar maps use entity-rich BIDS names and JSON sidecars. Preserve available MRS entities including `voi` and `nuc` in every derivative filename.
 
 Include derivative dataset metadata (`GeneratedBy`, source dataset references), source checksums, all selected entities, package/Python/FSL-MRS versions, basis checksum/metadata, resolved configuration, and per-command argv, timestamp, exit status, stdout/stderr locations. Never alter native FSL products to sanitize invalid outputs.
 

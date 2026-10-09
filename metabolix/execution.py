@@ -43,6 +43,8 @@ def run_command(
     label: str,
     logger: logging.Logger,
     dry_run: bool = False,
+    log_dir: Path | None = None,
+    log_stem: str | None = None,
 ) -> dict[str, Any]:
     record: dict[str, Any] = {
         "label": label,
@@ -56,10 +58,11 @@ def run_command(
         return record
     logger.info("Running %s", label)
     completed = subprocess.run(argv, text=True, capture_output=True, check=False)
-    log_dir = stage_dir.parent / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    stdout_path = log_dir / f"{label}_stdout.txt"
-    stderr_path = log_dir / f"{label}_stderr.txt"
+    output_log_dir = log_dir or stage_dir.parent / "logs"
+    output_log_dir.mkdir(parents=True, exist_ok=True)
+    prefix = f"{log_stem}_desc-metabolix-{label}" if log_stem else label
+    stdout_path = output_log_dir / f"{prefix}-stdout_log.txt"
+    stderr_path = output_log_dir / f"{prefix}-stderr_log.txt"
     stdout_path.write_text(completed.stdout)
     stderr_path.write_text(completed.stderr)
     record.update(

@@ -7,7 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-_ENTITY = re.compile(r"(?:^|_)(sub|ses|task|acq|run|rec|echo|part)-([^_]+)")
+_ENTITY = re.compile(
+    r"(?:^|_)(sub|ses|task|acq|ce|rec|dir|run|mod|echo|part|recording|proc|space|split|voi|nuc|mt|inv|flip|tr|te)-([^_]+)"
+)
 
 
 @dataclass(frozen=True)
@@ -83,5 +85,15 @@ def output_identity(item: MRSInput) -> Path:
     parts = [subject]
     if item.entities.get("ses"):
         parts.append(f"ses-{item.entities['ses']}")
-    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", item.source_name)
-    return Path(*parts, safe_name)
+    entity_order = (
+        "sub", "ses", "task", "acq", "ce", "rec", "dir", "run", "mod", "echo", "part",
+        "recording", "proc", "space", "split", "voi", "nuc", "mt", "inv", "flip", "tr", "te",
+    )
+    name_parts = []
+    for entity in entity_order:
+        value = item.entities.get(entity)
+        if value:
+            safe_value = re.sub(r"[^A-Za-z0-9]+", "", str(value))
+            if safe_value:
+                name_parts.append(f"{entity}-{safe_value}")
+    return Path(*parts, "mrs", f"{'_'.join(name_parts)}_desc-metabolix")
