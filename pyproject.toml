@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "metabolix-bids"
+version = "0.1.0"
+description = "CLI-first BIDS application for multi-voxel MRS processing with FSL-MRS"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24", "nibabel>=5.1", "PyYAML>=6.0"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Science/Research",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+
+[project.scripts]
+metabolix = "metabolix.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["metabolix*"]

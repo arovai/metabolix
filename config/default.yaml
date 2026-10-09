@@ -1,0 +1,39 @@
+processing:
+  coil_combine: auto
+  coil_reference: null
+  water_removal: "off"
+  water_ppm: [4.5, 4.9]
+basis:
+  path: null
+  mapping: []
+  binary_dir: null
+fit:
+  ppmlim: null
+  ignore: []
+  combine: []
+  internal_reference: []
+  baseline: null
+  algorithm: null
+  mask: null
+roi:
+  freesurfer_dir: null
+  map: null
+  labels: {}
+  sampling_step_mm: 0.5
+  minimum_overlap_percent: null
+execution:
+  n_jobs: 1
+  resume: false
+  overwrite: false
+qc:
+  max_crlb_percent: null
+  min_snr: null
+  max_linewidth_hz: null
+report:
+  enabled: true
+  metabolites: []
+selection:
+  participant_label: []
+  session: []
+  acquisition: []
+  run: []
