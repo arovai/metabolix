@@ -101,8 +101,13 @@ def calculate_roi_overlap(
     roi_dir.mkdir(parents=True, exist_ok=True)
     qform, qcode = validated.image.get_qform(coded=True)
     sform, scode = validated.image.get_sform(coded=True)
-    seg_qform, seg_qcode = seg_img.get_qform(coded=True)
-    seg_sform, seg_scode = seg_img.get_sform(coded=True)
+    # MGH/MGZ stores scanner-RAS geometry in affine, without NIfTI q/sforms.
+    # Keep the disagreement check for NIfTI ROI maps only.
+    seg_qform = seg_sform = None
+    seg_qcode = seg_scode = 0
+    if isinstance(seg_img, (nib.Nifti1Image, nib.Nifti2Image)):
+        seg_qform, seg_qcode = seg_img.get_qform(coded=True)
+        seg_sform, seg_scode = seg_img.get_sform(coded=True)
     geometry_warning = bool(
         (qcode and scode and not np.allclose(qform, sform, atol=0.01))
         or (seg_qcode and seg_scode and not np.allclose(seg_qform, seg_sform, atol=0.01))

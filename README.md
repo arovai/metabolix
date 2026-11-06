@@ -129,3 +129,14 @@ Structured audit artifacts are in `specs/agent/`: the tool specification, finali
 ## Development Validation
 
 The project intentionally includes no test suite, pytest/coverage dependencies, fixtures, or testing CI, as requested. Syntax, CLI help, configuration handling, dependency diagnostics and dry-run checks are the lightweight validation surface.
+
+
+### Resuming a subset of participants
+
+You may change `--participant-label` when resuming with `--resume`. Participant
+selection is excluded from each input's fingerprint; input contents, basis,
+processing settings, and software versions remain checked. Existing manifests
+created with participant selection in their fingerprint are supported: the
+application verifies them against current files and settings while allowing only
+the participant list to differ. Completed processing stages are reused. Do not
+use `--overwrite` to resume an interrupted run.

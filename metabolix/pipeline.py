@@ -101,10 +101,15 @@ def _write_dataset_description(output_root: Path) -> None:
     )
 
 
-def _fingerprint(item: MRSInput, basis: Path, config: dict[str, Any], fsl_version: str) -> str:
+def _fingerprint(
+    item: MRSInput, basis: Path, config: dict[str, Any], fsl_version: str,
+    *, include_participant_selection: bool = False,
+) -> str:
     stable_config = json.loads(json.dumps(config, default=str))
     stable_config["execution"].pop("resume", None)
     stable_config["execution"].pop("overwrite", None)
+    if not include_participant_selection:
+        stable_config.get("selection", {}).pop("participant_label", None)
     payload = {
         "input_sha256": checksum(item.path),
         "sidecar_sha256": checksum(item.sidecar) if item.sidecar else None,
@@ -116,6 +121,25 @@ def _fingerprint(item: MRSInput, basis: Path, config: dict[str, Any], fsl_versio
     }
     canonical = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _legacy_resume_matches(
+    previous: dict[str, Any], item: MRSInput, basis: Path,
+    config: dict[str, Any], fsl_version: str,
+) -> bool:
+    """Verify old manifests against current inputs, replacing only participant selection."""
+    saved_config = previous.get("resolved_config")
+    if not isinstance(saved_config, dict):
+        return False
+    saved_selection = saved_config.get("selection")
+    if not isinstance(saved_selection, dict) or "participant_label" not in saved_selection:
+        return False
+    legacy_config = json.loads(json.dumps(config, default=str))
+    legacy_config.setdefault("selection", {})["participant_label"] = saved_selection["participant_label"]
+    # Rehash CURRENT files and settings: never trust a hash of old metadata alone.
+    return previous.get("fingerprint") == _fingerprint(
+        item, basis, legacy_config, fsl_version, include_participant_selection=True,
+    )
 
 
 def _resolve_fsl(name: str, config: dict[str, Any]) -> str:
@@ -910,7 +934,10 @@ def _process_one(
         if config["execution"]["resume"] and manifest_path.exists():
             previous = json.loads(manifest_path.read_text())
             if previous.get("fingerprint") != fingerprint:
-                raise ValueError(f"Resume refused for {run_dir}: input/configuration fingerprint changed.")
+                if not _legacy_resume_matches(previous, item, basis, config, fsl_version):
+                    raise ValueError(f"Resume refused for {run_dir}: input/configuration fingerprint changed.")
+                logger.info("Verified legacy resume fingerprint ignoring participant selection only.")
+                previous["fingerprint"] = fingerprint
             if previous.get("status") == "completed":
                 logger.info("Verified completed run; resume skips %s", run_dir)
                 return
