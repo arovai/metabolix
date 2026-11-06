@@ -173,13 +173,37 @@ def checksum(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _fsl_python(fsl_executable: str) -> Path:
+    """Find Python in the executable's environment, including FSL shell wrappers."""
+    executable = Path(fsl_executable).absolute()
+    directories: list[Path] = []
+    # Check the original location first: resolving a venv symlink can leave its
+    # environment. FSL's share/fsl/bin wrappers use <installation>/bin/Python.
+    for path in (executable, executable.resolve()):
+        directory = path.parent
+        if directory.parts[-3:] == ("share", "fsl", "bin"):
+            directory = directory.parents[2] / "bin"
+        if directory not in directories:
+            directories.append(directory)
+    for directory in directories:
+        candidates = [directory / "python3", directory / "python"]
+        candidates.extend(sorted(
+            candidate for candidate in directory.glob("python3.*")
+            if candidate.name.removeprefix("python3.").isdigit()
+        ))
+        for candidate in candidates:
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return candidate
+    searched = ", ".join(str(directory) for directory in directories)
+    raise ValueError(
+        f"Could not locate the Python runtime for FSL-MRS executable {fsl_executable}. "
+        f"Searched: {searched}. Set --binary-dir to the FSL-MRS environment's bin directory."
+    )
+
+
 def inspect_basis(path: Path, bandwidth_hz: float, points: int, fsl_executable: str) -> dict[str, Any]:
     """Read and format a basis using the Python runtime paired with FSL-MRS."""
-    executable_dir = Path(fsl_executable).resolve().parent
-    python_candidates = [executable_dir / "python3", executable_dir / "python", executable_dir / "python3.12"]
-    interpreter = next((candidate for candidate in python_candidates if candidate.is_file() and os.access(candidate, os.X_OK)), None)
-    if interpreter is None:
-        raise ValueError(f"Could not locate a Python interpreter alongside FSL-MRS executable {fsl_executable}.")
+    interpreter = _fsl_python(fsl_executable)
     program = r"""
 import json, sys
 import numpy as np
@@ -226,11 +250,7 @@ def make_voxel_diagnostic_pdf(
     fsl_executable: str,
 ) -> None:
     """Create paginated real-spectrum, fit, baseline, and residual plots for every fitted voxel."""
-    executable_dir = Path(fsl_executable).resolve().parent
-    python_candidates = [executable_dir / "python3", executable_dir / "python", executable_dir / "python3.12"]
-    interpreter = next((candidate for candidate in python_candidates if candidate.is_file() and os.access(candidate, os.X_OK)), None)
-    if interpreter is None:
-        raise ValueError(f"Could not locate a Python interpreter alongside FSL-MRS executable {fsl_executable}.")
+    interpreter = _fsl_python(fsl_executable)
     program = r"""
 import json, sys
 from pathlib import Path
