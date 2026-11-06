@@ -14,6 +14,12 @@
 - Anatomical overlap is nominal geometry calculated from existing image-world affines. Matching headers do not prove registration. No FSL FLIRT transform is treated as a generic world transform. Finite MRSI point-spread response is not modeled.
 - Successful processing does not establish validated metabolite measurements. Report spectral quality, fit uncertainty, nominal ROI overlap and quantification units separately.
 
+ROI means can include voxels with only a few percent overlap by default, and QC
+flags do not currently exclude otherwise eligible finite estimates. Anatomical
+sampling does not improve spectroscopic resolution. See [ROI estimates and
+metabolite units](ROI_ANALYSIS.md) for thresholds, partial-volume limitations and
+output definitions.
+
 ## Troubleshooting
 
 **`fsl_mrs_proc` or `fsl_mrsi` not found**: install FSL-MRS using the official FSL installer or its Conda channel, activate that environment, verify with `fsl_mrs --version` and `fsl_mrs_verify`, then run `metabolix --check-deps`. Alternatively set `basis.binary_dir` or `--binary-dir`. Installing `fslpy` alone does not install FSL executables.

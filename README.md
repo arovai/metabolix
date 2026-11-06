@@ -118,6 +118,8 @@ OUTPUT_DIR/
 
 The optional bracketed entities appear only when present in the input; MRS-specific `voi` and `nuc` entities are retained too. The report's first sections provide links to QC tables, downloadable raw/internal/QC maps, figures, native outputs, logs and provenance. Heatmaps emphasize the internally referenced maps when available; the detailed map directory retains all published scales and component QC maps.
 
+See [ROI estimates and metabolite units](docs/ROI_ANALYSIS.md) for the averaging formula, overlap thresholds, small-ROI limitations, output table columns, and the meaning of `internal` maps.
+
 ROI overlap uses scanner/world affines, fine sampling at <=0.5 mm with a 1 mm sensitivity comparison, whole-MRS-voxel denominator, and separate segmentation field-of-view coverage. It never restricts the default fit mask. Existing header alignment is assumed, not validated registration.
 
 ## Scientific Notes and Tutorial

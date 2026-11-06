@@ -90,6 +90,16 @@ The report includes pre/post coil-combination spectra and mean FID-magnitude QC,
 
 FreeSurfer `aseg.mgz` labels 10 and 49 denote left/right thalamus in this preset. Overlap is estimated by fine world-affine sampling, uses the entire nominal MRS voxel as denominator, and reports segmentation field-of-view coverage separately. It assumes existing scanner/world affines are aligned; no registration is performed. MRSI spatial response may spread signal beyond nominal boundaries.
 
+The ROI metabolite table is `roi/sub-11_desc-metabolix-roi-weighted_summary.tsv`
+(with additional source entities when applicable). It contains separate raw and
+internal-reference weighted means per ROI, metabolite and processing branch.
+Default ROI averaging includes all positive overlaps; `--minimum-overlap-percent`
+can restrict reporting, without restricting fitting. This averages fitted values,
+not spectra, and does not upsample MRS data. Internal values are ratios to the
+configured reference (Cr+PCr by default); multiply by 100 for percent of reference.
+Read [ROI estimates and metabolite units](ROI_ANALYSIS.md) before interpreting
+small ROIs, contributing counts, QC flags or uncertainty.
+
 Newton `*_sd` products are CRLB-derived percentage estimates, not absolute standard deviations and not fully propagated uncertainty on ratios. Ratios with zero reference are undefined. Never describe arbitrary fit amplitudes or creatine ratios as molar concentrations. Fit completion, anatomical overlap, spectral quality, fitting uncertainty and quantification units are distinct claims.
 
 To aggregate existing participant QC tables without refitting:
