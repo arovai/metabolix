@@ -108,4 +108,64 @@ To aggregate existing participant QC tables without refitting:
 metabolix "$BIDS_DIR" "$OUTPUT_DIR" group
 ```
 
-Group output is `OUTPUT_DIR/group/group_summary.tsv`.
+Group output is `OUTPUT_DIR/group/group_summary.tsv`, with one row per participant and a JSON column dictionary.
+
+## Participant-wide group table
+
+Group mode reads existing participant results without running any fitting:
+
+```bash
+metabolix "$BIDS_DIR" "$OUTPUT_DIR" group
+```
+
+`group/group_summary.tsv` contains **one row per analysed participant**, keyed by
+`participant_id` (for example `sub-12`). It includes whole-grid statistics and,
+when available, the participant ROI metabolite summaries. There is no pooled
+`GROUP` row. Session, acquisition, run and other non-subject entities, processing
+branches and ROIs are kept in separate columns, never silently averaged together.
+
+Example columns for an acquisition without additional entities:
+
+```text
+participant_id
+age
+sex
+group
+metabolix__branch-original__scope-grid__internal_reference_ratio_NAA__mean
+metabolix__branch-original__scope-roi__roi-left_thalamus__internal_reference_ratio_NAA__weighted_mean
+metabolix__branch-waterremoved__scope-roi__roi-right_thalamus__raw_fit_NAA__weighted_mean
+```
+
+Grid metrics retain finite-value count (`n`), mean, population SD and median,
+plus fit-status counts. ROI metrics retain the overlap-weighted mean,
+contributing voxel count and configured overlap threshold. ROI estimates are
+copied from participant summaries, using their original reporting settings.
+Internal values remain ratios, not percentages; multiply by 100 for percent of
+reference. QC flags alone do not exclude otherwise eligible estimates.
+
+If `BIDS_DIR/participants.tsv` exists, all its columns are automatically joined
+by `participant_id`. An optional `sub-` prefix is normalized on both sides;
+leading zeros are preserved (`sub-01` is distinct from `sub-1`). Metadata values
+are read as text, preserving categories and missing-value markers. Analysed
+participants without metadata remain in the table with `n/a` values; participants
+with no selected analysis are not added. Duplicate normalized IDs, malformed
+metadata, conflicting column names or duplicate measurements cause a clear error
+instead of silently dropping or averaging records. Missing `participant_id` in
+an existing participants file is an error. Without a participants file, only
+analysis columns and participant IDs are written.
+
+`group/group_summary.json` documents each measure column's branch, ROI, metric,
+statistic, acquisition entities and source tables. Double underscores separate
+column components; special characters and embedded separators are URL-encoded.
+Missing estimates are `n/a`. For the overlap-threshold field, `n/a` denotes no
+configured minimum, as in the participant ROI summary.
+
+Use `--participant-label` to select a subset; session/acquisition/run filters are
+also respected. After preserving an older summary if needed, use `--overwrite`
+in **group mode** to regenerate the group TSV and JSON. This does not overwrite
+participant fits. Changing the group format does not require rerunning participant
+processing. `--dry-run` validates aggregation and the metadata join without
+writing outputs.
+
+
+Participant HTML/Markdown reports include an output-label glossary. NIfTI maps and TSV tables carry JSON descriptions and units; voxel tables also retain their legacy `_definitions.json` sidecar. `group_summary.md` explains group labels, while `group_summary.json` describes every measure column. See the [README glossary](../README.md#output-labels-and-units) for CRLB, SNR, linewidth, internal ratios, ROI overlap and distribution statistics.

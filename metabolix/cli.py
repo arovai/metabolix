@@ -14,7 +14,8 @@ import yaml
 
 from metabolix import __version__
 from metabolix.config import DEFAULT_CONFIG, ConfigError, dump_yaml, load_config
-from metabolix.pipeline import run_group, run_participant
+from metabolix.pipeline import run_participant
+from metabolix.group import run_group
 
 
 class Colors:
@@ -267,7 +268,7 @@ def main(argv: list[str] | None = None) -> int:
             raise ConfigError(f"BIDS input directory does not exist: {args.bids_dir}")
         if args.analysis_level == "participant":
             return run_participant(args.bids_dir, args.output_dir, config, args.dry_run, logger)
-        return run_group(args.output_dir, config, args.dry_run, logger)
+        return run_group(args.bids_dir, args.output_dir, config, args.dry_run, logger)
     except (ConfigError, OSError, RuntimeError, ValueError) as exc:
         logger.error("%s", exc)
         return 2

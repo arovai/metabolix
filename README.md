@@ -142,3 +142,53 @@ created with participant selection in their fingerprint are supported: the
 application verifies them against current files and settings while allowing only
 the participant list to differ. Completed processing stages are reused. Do not
 use `--overwrite` to resume an interrupted run.
+
+
+Group output is a participant-wide table: one row per analysed participant, separate
+columns for acquisition/branch/ROI/measure combinations, and an automatic join
+with input `participants.tsv` metadata. See [group table details](docs/TUTORIAL.md#participant-wide-group-table).
+
+
+## Output labels and units
+
+These definitions describe estimates and QC, not acceptance criteria. Blank/n/a estimates are missing; map zeros may also encode unfitted or invalid results.
+
+| Label | Units | Meaning |
+|---|---|---|
+| `crlb_percent` — CRLB / relative fit uncertainty | percent | CRLB means Cramér–Rao lower bound: a model-based lower bound on estimator variance under statistical assumptions. For Newton fitting, FSL-MRS reports 100 × sqrt(CRLB variance) / fitted estimate, i.e. relative SD, not variance. 20 means estimated SD about 20% of the fitted value; it is not a concentration, percent of reference, or 95% confidence interval. For MH (Metropolis–Hastings) fitting, the same legacy crlb_percent label holds posterior-sample SD divided by the posterior mean × 100, not a CRLB. The inspected FSL-MRS implementation caps percentages above 999 and maps undefined NaN percentages to 999. 999 is a capped/undefined result, not a precise uncertainty. Near-zero estimates can have very large relative uncertainty. Low uncertainty does not exclude artifacts, incorrect basis/sequence assumptions, bias or partial-volume mixing. There is no universal acceptance threshold; uncertainty of an internal ratio or ROI mean is not automatically propagated. |
+| `raw_fit` — Raw fitted amplitude | arbitrary units | FSL-MRS fitted amplitude before internal-reference scaling. Not a molar concentration; scaling can differ between spectra. |
+| `internal_reference_ratio` — Internal-reference ratio | dimensionless | Metabolite estimate divided by the sum of configured reference metabolites within the same voxel (default Cr+PCr). 1.5 means 150% of reference, not 150% of the total spectrum. A zero/nonfinite reference is invalid. Native/published FSL maps may encode invalid or unfitted values as zero; inspect voxel-table validity. |
+| `snr` — Signal-to-noise ratio (SNR) | dimensionless | FSL-MRS component-specific spectral QC SNR, using its noise estimation and matched-filter conventions. Not the residual-water/metabolite peak ratio; values depend on implementation and component and are not a universal quality score. |
+| `linewidth_fwhm_hz` — Full width at half maximum (FWHM) | Hz | FSL-MRS component spectral width at half maximum. Broader peaks can impair separation, but linewidth alone does not establish fit quality. Distinct from added nuisance broadening. |
+| `residual_l2_over_input_l2` — Relative residual norm | dimensionless | Euclidean norm of the complex time-domain residual divided by the complex input FID norm. Descriptive fit discrepancy; not a percentage of metabolite loss, a concentration uncertainty or a standalone quality criterion. |
+| `overlap_pct` — Nominal ROI overlap | percent | 100 × ROI volume inside an MRS voxel / entire nominal MRS voxel volume. Fine anatomical sampling does not upsample MRS signal or model its spatial response. Existing image alignment is assumed. |
+| `overlap_mm3` — Nominal ROI volume within voxel | mm^3 | Estimated intersection volume of the ROI with the nominal MRS voxel. |
+| `sampling_difference_pp` — Overlap sampling sensitivity | percentage points | Absolute difference between fine and 1 mm overlap estimates. A numerical sensitivity check, not a rigorous error bound or a relative percent change. |
+| `segmentation_fov_pct` — Segmentation field-of-view (FOV) coverage | percent | Percentage of the entire MRS voxel lying inside the segmentation image field of view, not necessarily inside an ROI. |
+| `weighted_mean` — Overlap-weighted ROI mean | same as underlying metric | Sum(overlap fraction × finite voxel estimate) / sum(overlap fraction) over eligible voxels. Fits remain on the original grid; spectra are not averaged/refitted. All positive overlaps contribute by default. QC flags alone do not exclude estimates. A mean of voxel ratios is not generally a ratio of mean amplitudes, and is not a pure-ROI concentration. |
+| `contributing_voxels` — Contributing voxel count | count | Integer count of contributing voxels (also called weighted_voxel_count); not the sum of weights or an effective sample size. Counts can differ by metabolite and scale. |
+| `minimum_overlap_percent` — Minimum ROI overlap threshold | percent | A reporting-only inclusion threshold relative to whole MRS voxel volume. Equality qualifies; zero overlap never contributes. Blank/n/a means no configured minimum. It is not a universal recommended quality threshold. |
+| `mean` — Arithmetic mean | same as underlying metric | Mean across finite estimates in completed voxels. A mean of voxel uncertainty percentages is descriptive, not uncertainty of the mean. |
+| `sd` — Across-voxel standard deviation (SD) | same as underlying metric | Population SD (ddof=0) across included voxel values, not standard error and not the per-metabolite fit SD. Native FSL uncertainties/*_sd maps instead contain percentage fit uncertainty. |
+| `median` — Median | same as underlying metric | 50th percentile across included finite voxel values. |
+| `p05` — 5th percentile | same as underlying metric | 5th percentile across included finite voxel values; not a confidence limit. |
+| `p95` — 95th percentile | same as underlying metric | 95th percentile across included finite voxel values; not a confidence limit. |
+| `n` — Number of finite values | count | Number of finite metric values included in the summary, not necessarily all fitted voxels. |
+| `status` — Processing status | categorical | fit_completed means processing returned a fit, not scientifically validated quantification. zero_signal, nonfinite_signal and outside_fit_mask describe exclusion. |
+| `reason` — Exclusion reason | categorical | Reason a voxel was not included in fitting; blank for eligible voxels. |
+| `qc_flags` — Quality-control (QC) flags | categorical | Semicolon-separated operational flags: crlb_above_operational_threshold, snr_below_operational_threshold, linewidth_above_operational_threshold. Flags retain estimates and do not automatically exclude them from ROI/group summaries. Thresholds are user choices, not universal acceptance rules. |
+| `branch` — Processing branch | categorical | original is the fitted branch without additional residual-water removal (normally after coil combination); waterremoved includes that optional removal. No preferred branch is automatically selected. |
+| `difference` — Paired branch difference | same as underlying metric | Water-removed value minus original value in matched eligible voxels. Differences of percentage metrics are percentage points, not relative percent changes. No branch is automatically selected. |
+| `fid` — Free induction decay (FID) | input signal units | Complex time-domain MRS signal; Fourier transformation produces a spectrum. Real, imaginary and magnitude displays are different representations. |
+| `ppm` — Chemical shift | ppm | Parts-per-million frequency coordinate; spectral window boundaries refer to chemical shift, not concentration. |
+| `te_tr` — Echo time (TE) and repetition time (TR) | seconds in BIDS metadata | Acquisition timing relevant to basis compatibility and relaxation weighting; often displayed in milliseconds elsewhere. |
+| `basis` — Spectral basis | component-dependent | Simulated or measured component spectra used by the fitting model. Successful loading/resampling does not establish acquisition compatibility. |
+| `roi` — Region of interest (ROI) | label | Anatomical region defined by segmentation or mask. Coverage of the ROI by the grid and purity of an MRS voxel have different denominators. |
+
+Model nuisance parameters: `p0` is phase in degrees; `p1` is first-order phase in seconds; `shift_group*` is in ppm; `gamma_group*`, `sigma_group*` and `combined_lw_group*` are added broadening in Hz, excluding intrinsic basis linewidth.
+
+Metabolite abbreviations: Ala: Alanine; Cr: Creatine; PCr: Phosphocreatine; NAA: N-acetylaspartate; NAAG: N-acetylaspartylglutamate; GPC: Glycerophosphocholine; PCh: Phosphocholine; Glu: Glutamate; Gln: Glutamine; GSH: Glutathione; Lac: Lactate; mI: Myo-inositol; sI: Scyllo-inositol; Tau: Taurine; H2O: Water; CrCH2: Auxiliary creatine methylene basis component. Combined labels joined by + are sums of fitted components, not constraints on their ratios.
+
+Sources: https://open.oxcin.ox.ac.uk/pages/fslcourse/lectures/MRS4_data_quality.pdf, https://open.oxcin.ox.ac.uk/pages/fsl/fsl_mrs/fitting.html
+
+Definitions are generated from `metabolix/output_definitions.py` for participant reports and output sidecars. Group mode writes a readable `group_summary.md` and per-column definitions in `group_summary.json`; the TSV remains one row per participant. Existing `crlb_percent_*` names are retained for compatibility, including MH-derived uncertainties whose method is identified in metadata.

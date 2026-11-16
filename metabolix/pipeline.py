@@ -31,6 +31,7 @@ from metabolix.validation import (
 from metabolix.config import dump_yaml
 from metabolix.output_layout import OutputLayout, bids_filename
 from metabolix.reporting import generate_report_figures
+from metabolix.output_definitions import describe, glossary, glossary_markdown, glossary_html
 
 
 def _entity_filters(config: dict[str, Any]) -> dict[str, list[str]]:
@@ -278,7 +279,7 @@ def _load_metric_maps(
     return metric_maps
 
 
-def _publish_fsl_maps(layout: OutputLayout, branch: str, fit_dir: Path) -> list[dict[str, str]]:
+def _publish_fsl_maps(layout: OutputLayout, branch: str, fit_dir: Path, config: dict[str, Any] | None = None) -> list[dict[str, str]]:
     """Expose native FSL scalar maps as BIDS-named maps and report heatmap inputs."""
     definitions = (
         ("concs/raw", f"metabolix-{branch}-raw", "Raw fit scaling", "a.u."),
@@ -321,12 +322,21 @@ def _publish_fsl_maps(layout: OutputLayout, branch: str, fit_dir: Path) -> list[
             output = layout.map_dir / bids_filename(layout.item, desc, "statmap", ".nii.gz")
             image = nib.load(str(source))
             nib.save(image, str(output))
+            prefix = {"concs/raw": "raw_fit_", "concs/internal": "internal_reference_ratio_",
+                      "uncertainties": "crlb_percent_"}.get(source_folder,
+                      "snr_" if kind == "snr" else "linewidth_fwhm_hz_")
+            definition = describe(prefix + name, config)
+            map_units = definition["Units"]
+            if source_folder == "uncertainties":
+                title = f"{branch}: relative fit uncertainty {name}"
             map_metadata = {
-                "Description": label,
+                **definition,
+                "Metric": prefix + name,
                 "Metabolite": name,
                 "ProcessingBranch": branch,
                 "Scaling": source_folder.removeprefix("concs/"),
-                "Units": map_units,
+                "Units": definition["Units"],
+                "MissingValues": "Native FSL maps can encode unfitted/invalid values as zero; consult voxel QC validity.",
                 "SourceMap": str(source),
             }
             output.with_name(output.name[:-7] + ".json").write_text(json.dumps(map_metadata, indent=2) + "\n")
@@ -396,14 +406,17 @@ def _write_qc_table(
     definitions = {
         "raw_fit_": "FSL-MRS raw scaling values in arbitrary fit units; not molar concentrations.",
         "internal_reference_ratio_": "FSL-MRS internal scaling relative to configured/default metabolite reference; ratio uncertainty is not automatically propagated.",
-        "crlb_percent_": "FSL-MRS Newton CRLB-derived percentage uncertainty; may be capped and is not absolute SD.",
+        "crlb_percent_": describe("crlb_percent", config)["Description"],
         "snr_": "FSL-MRS component-specific QC SNR map.",
         "linewidth_fwhm_hz_": "FSL-MRS component-specific FWHM map in Hz.",
         "residual_l2_over_input_l2": "Euclidean norm of complex time-domain residual divided by complex input-FID norm; descriptive fit residual summary, not metabolite loss.",
         "qc_flags": "Operational threshold flags only; estimates are retained and never automatically rejected.",
     }
     definitions_path = path.with_name(path.name.replace("_voxelqc.tsv", "_voxelqc_definitions.json"))
+    definitions["Columns"] = {field: describe(field, config) for field in fields}
+    definitions["Glossary"] = glossary()
     definitions_path.write_text(json.dumps(definitions, indent=2) + "\n")
+    path.with_suffix(".json").write_text(json.dumps(definitions, indent=2) + "\n")
 
 
 def _write_branch_comparison(original: Path, waterremoved: Path, output_dir: Path, item: MRSInput) -> tuple[Path, Path]:
@@ -454,7 +467,10 @@ def _write_branch_comparison(original: Path, waterremoved: Path, output_dir: Pat
         "selection": "No branch is selected automatically from fit quality or uncertainty.",
     }
     summary_path = comparison_dir / bids_filename(item, "metabolix-waterRemovalComparison", "summary", ".json")
+    summary["Columns"] = {field: describe(field) for field in fields}
+    summary["MetricDefinitions"] = {field: describe(field) for field in numeric_fields}
     summary_path.write_text(json.dumps(summary, indent=2) + "\n")
+    table.with_suffix(".json").write_text(json.dumps({"Columns": summary["Columns"], "DifferenceDefinition": summary["paired_difference_definition"]}, indent=2) + "\n")
     return table, summary_path
 
 
@@ -614,6 +630,7 @@ def _write_report(
         ])
     md_lines.extend(["", "## Reproducibility", "", "Full commands, checksums, software versions, resolved configuration, and processing status are in the linked provenance files.", ""])
     report_md.parent.mkdir(parents=True, exist_ok=True)
+    md_lines.extend(["", glossary_markdown(config)])
     report_md.write_text("\n".join(md_lines) + "\n")
 
     quick_links = [
@@ -703,6 +720,7 @@ details{{margin:1rem 0;border:1px solid var(--line);padding:.8rem}}pre{{white-sp
 <section><h2>Basis used</h2><p>{html.escape('; '.join(basis_facts))}</p><p>The normalized component spectra are shown for inspection; their presence does not establish sequence equivalence or quantitative validity.</p><div class="gallery">{''.join(f'<figure><a href="{html.escape(rel(entry["path"]))}"><img loading="lazy" src="{html.escape(rel(entry["path"]))}" alt="{html.escape(entry["title"])}"></a><figcaption>{html.escape(entry["title"])}</figcaption></figure>' for entry in figures if "basis" in entry["kind"])}</div></section>
 <section><h2>Metabolite maps</h2><p>Heatmaps and downloadable NIfTI maps use the BIDS entity prefix. Review the scale and units in each map filename/report entry.</p><div class="maps">{''.join(heatmap_html)}</div></section>
 <section><h3>Downloadable NIfTI maps</h3><ul>{map_links}</ul></section>
+{glossary_html(config)}
 <section><h2>Voxel QC tables</h2><ul>{qc_links}</ul></section>
 {('<section><h2>Water-removal comparison</h2><p>Paired differences are water-removed minus original. No branch is selected automatically.</p><ul>' + comparison_html + '</ul></section>') if comparison_html else ''}
 <section><h2>Voxel-wise distributions</h2><table><thead><tr><th>Branch</th><th>Metric</th><th>N</th><th>Mean</th><th>SD</th><th>Median</th><th>P05</th><th>P95</th></tr></thead><tbody>{stats_rows}</tbody></table></section>
@@ -735,6 +753,13 @@ def _add_roi_columns(qc_path: Path, roi_path: Path) -> None:
         writer = csv.DictWriter(stream, fieldnames=fields, delimiter="\t")
         writer.writeheader()
         writer.writerows(rows)
+
+    for sidecar in (qc_path.with_suffix(".json"), qc_path.with_name(qc_path.name.replace("_voxelqc.tsv", "_voxelqc_definitions.json"))):
+        metadata = json.loads(sidecar.read_text()) if sidecar.exists() else {}
+        descriptions = metadata.setdefault("Columns", {})
+        for field in fields:
+            descriptions.setdefault(field, describe(field))
+        sidecar.write_text(json.dumps(metadata, indent=2) + "\n")
 
 
 def _write_roi_weighted_estimates(layout: OutputLayout, branches: list[str], config: dict[str, Any]) -> Path:
@@ -791,6 +816,12 @@ def _write_roi_weighted_estimates(layout: OutputLayout, branches: list[str], con
         writer = csv.DictWriter(stream, fieldnames=fields, delimiter="\t")
         writer.writeheader()
         writer.writerows(rows)
+    output_path.with_suffix(".json").write_text(json.dumps({
+        "Columns": {field: describe(field, config) for field in fields},
+        "Metrics": {row["metric"]: describe(row["metric"], config) for row in rows},
+        "Aggregation": describe("weighted_mean")["Description"],
+        "MissingValues": "Blank estimate means no eligible finite voxel values; blank threshold means no minimum.",
+    }, indent=2) + "\n")
     return output_path
 
 
@@ -1101,7 +1132,7 @@ def _process_one(
                 if not qc_path.is_file():
                     raise ValueError(f"Manifest marks {stage_name} complete but its BIDS-named voxel QC table is missing.")
             branch_qc_paths[branch] = qc_path
-            map_outputs.extend(_publish_fsl_maps(layout, branch, stage))
+            map_outputs.extend(_publish_fsl_maps(layout, branch, stage, config))
             fsl_mrsi_runtime = find_executable("fsl_mrsi", config["basis"].get("binary_dir"))
             diagnostic_pdf = layout.figure_dir / bids_filename(item, f"metabolix-{branch}-voxelDiagnostics", "report", ".pdf")
             diagnostic_paths[branch] = diagnostic_pdf
@@ -1225,103 +1256,4 @@ def run_participant(
         logger.error("%d/%d input(s) failed.", len(failures), len(inputs))
         return 1
     logger.info("%s %d input(s).", "Validated" if dry_run else "Processed", len(inputs))
-    return 0
-
-
-def run_group(output_dir: Path, config: dict[str, Any], dry_run: bool, logger: logging.Logger) -> int:
-    derivative_root = output_dir
-    tables = sorted(
-        path for path in derivative_root.rglob("*_voxelqc.tsv")
-        if "waterRemovalComparison" not in path.name
-    )
-    if not tables:
-        raise ValueError(f"No BIDS-named *_voxelqc.tsv participant tables found under {derivative_root}.")
-    if dry_run:
-        logger.info("DRY RUN group aggregation: %d participant/run table(s) found.", len(tables))
-        return 0
-    summary_rows = []
-    group_values: dict[tuple[str, str], list[float]] = {}
-    group_subjects: dict[tuple[str, str], set[str]] = {}
-    group_voxel_counts: dict[tuple[str, str], int] = {}
-    for table in tables:
-        with table.open(newline="") as stream:
-            voxel_rows = list(csv.DictReader(stream, delimiter="\t"))
-        if not voxel_rows:
-            continue
-        subjects = sorted({row.get("entity_sub", "") for row in voxel_rows if row.get("entity_sub")})
-        branches = sorted({row.get("branch", "unknown") for row in voxel_rows})
-        metrics = [
-            key for key in voxel_rows[0]
-            if key.startswith(("raw_fit_", "internal_reference_ratio_", "crlb_percent_", "snr_", "linewidth_fwhm_hz_"))
-            or key == "residual_l2_over_input_l2"
-        ]
-        for branch in branches:
-            branch_rows = [row for row in voxel_rows if row.get("branch") == branch]
-            completed = [row for row in branch_rows if row.get("status") == "fit_completed"]
-            common = {
-                "source_table": str(table.relative_to(derivative_root)),
-                "participant": ";".join(subjects),
-                "branch": branch,
-                "voxel_rows": len(branch_rows),
-                "fit_completed_rows": len(completed),
-                "invalid_or_excluded_rows": len(branch_rows) - len(completed),
-            }
-            if not metrics:
-                summary_rows.append({**common, "metric": "fit_status_only", "n": len(completed), "mean": "", "sd": "", "median": ""})
-            for metric in metrics:
-                values = []
-                for row in completed:
-                    try:
-                        value = float(row[metric])
-                        if np.isfinite(value):
-                            values.append(value)
-                    except (KeyError, ValueError):
-                        continue
-                if values:
-                    array = np.asarray(values, dtype=float)
-                    summary_rows.append(
-                        {
-                            **common,
-                            "metric": metric,
-                            "n": len(values),
-                            "mean": float(array.mean()),
-                            "sd": float(array.std(ddof=0)),
-                            "median": float(np.median(array)),
-                        }
-                    )
-                    key = (branch, metric)
-                    group_values.setdefault(key, []).extend(values)
-                    group_subjects.setdefault(key, set()).update(subjects)
-                    group_voxel_counts[key] = group_voxel_counts.get(key, 0) + len(branch_rows)
-    for (branch, metric), values in sorted(group_values.items()):
-        array = np.asarray(values, dtype=float)
-        summary_rows.append(
-            {
-                "source_table": "ALL_PARTICIPANTS",
-                "participant": "GROUP",
-                "branch": branch,
-                "voxel_rows": group_voxel_counts[(branch, metric)],
-                "fit_completed_rows": len(values),
-                "invalid_or_excluded_rows": "",
-                "metric": metric,
-                "n": len(values),
-                "mean": float(array.mean()),
-                "sd": float(array.std(ddof=0)),
-                "median": float(np.median(array)),
-                "participant_count": len(group_subjects[(branch, metric)]),
-            }
-        )
-    if not summary_rows:
-        raise ValueError("Participant QC tables contain no rows to aggregate.")
-    group_dir = derivative_root / "group"
-    group_dir.mkdir(parents=True, exist_ok=True)
-    summary_path = group_dir / "group_summary.tsv"
-    if summary_path.exists() and not config["execution"]["overwrite"]:
-        raise ValueError(f"Group summary already exists: {summary_path}. Set execution.overwrite=true to replace it.")
-    fields = ["source_table", "participant", "participant_count", "branch", "voxel_rows", "fit_completed_rows", "invalid_or_excluded_rows", "metric", "n", "mean", "sd", "median"]
-    with summary_path.open("w", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=fields, delimiter="\t")
-        writer.writeheader()
-        writer.writerows(summary_rows)
-    logger.info("Aggregated %d participant/run QC table(s) into %s; no participant refitting performed.", len(tables), summary_path)
     return 0
