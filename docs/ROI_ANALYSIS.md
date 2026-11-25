@@ -109,7 +109,7 @@ Within each acquisition bundle, for example
 
 | File in `roi/` | Contents |
 |---|---|
-| `sub-12_desc-metabolix-roi-weighted_summary.tsv` | One row per branch, ROI and available raw/internal metabolite metric. |
+| `sub-12_desc-metabolix-roi-weighted_summary.tsv` | One row per branch, ROI and available raw/internal metabolite or component QC metric. |
 | `sub-12_desc-metabolix-roi-overlap_voxelqc.tsv` | Per-voxel ROI percentages, overlap volumes, sampling differences and segmentation FOV coverage. |
 | `sub-12_desc-metabolix-roi_summary.json` | Geometry, labels, sampling settings and ROI grid-coverage summaries. |
 | `*_statmap.nii.gz` and sidecars | ROI overlap and segmentation FOV coverage maps, in percent. |
@@ -121,13 +121,16 @@ The weighted summary has these columns:
 |---|---|
 | `branch` | `original` or `waterremoved`. |
 | `roi` | Label name, such as `left_thalamus`. |
-| `metric` | Scale plus metabolite, such as `internal_reference_ratio_NAA`. |
-| `overlap_weighted_voxel_estimate` | Weighted mean defined above; blank if no eligible estimates. |
+| `metric` | Scale plus metabolite/component, such as `internal_reference_ratio_NAA`, `crlb_percent_NAA`, `snr_NAA` or `linewidth_fwhm_hz_NAA`. |
+| `overlap_weighted_voxel_estimate` | Weighted mean defined above; blank if no eligible finite values. For QC metrics, this is a descriptive mean of per-voxel values, not QC recomputed from an ROI spectrum. |
 | `weighted_voxel_count` | Integer number of contributing voxels, despite its name; not a sum of weights or effective sample size. |
 | `minimum_overlap_threshold_percent` | Applied threshold; blank means no minimum. |
 | `interpretation` | Reminder that this is not a pure-ROI concentration or an averaged-spectrum fit. |
 
-Use `qc/` voxel tables alongside these summaries to examine individual fits and
-flags. The ROI table currently includes raw and internal estimates, not all QC
-map types or propagated ROI uncertainty. See the [tutorial](TUTORIAL.md) for
-processing commands and [limitations](LIMITATIONS.md) for broader QC guidance.
+The ROI table includes raw/internal metabolite values and available component
+CRLB-derived uncertainty, SNR and FWHM linewidth metrics. QC flags do not exclude
+voxels from these means. A CRLB-derived value averaged across voxels is not
+uncertainty of an ROI mean, and uncertainty on metabolite ratios is not propagated.
+Use `qc/` voxel tables alongside ROI summaries to inspect individual voxel values
+and flags. See the [tutorial](TUTORIAL.md) for processing commands and
+[limitations](LIMITATIONS.md) for broader QC guidance.

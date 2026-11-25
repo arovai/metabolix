@@ -777,7 +777,16 @@ def _write_roi_weighted_estimates(layout: OutputLayout, branches: list[str], con
             voxel_rows = list(csv.DictReader(stream, delimiter="\t"))
         if not voxel_rows:
             continue
-        metrics = [key for key in voxel_rows[0] if key.startswith(("raw_fit_", "internal_reference_ratio_"))]
+        metrics = [
+            key for key in voxel_rows[0]
+            if key.startswith((
+                "raw_fit_",
+                "internal_reference_ratio_",
+                "crlb_percent_",
+                "snr_",
+                "linewidth_fwhm_hz_",
+            ))
+        ]
         for roi_column in roi_columns:
             roi_name = roi_column.removesuffix("_overlap_pct")
             for metric in metrics:
@@ -807,7 +816,10 @@ def _write_roi_weighted_estimates(layout: OutputLayout, branches: list[str], con
                         "overlap_weighted_voxel_estimate": weighted_sum / weight_sum if weight_sum else "",
                         "weighted_voxel_count": count,
                         "minimum_overlap_threshold_percent": threshold if threshold is not None else "",
-                        "interpretation": "Nominal overlap-weighted voxel estimate; not a pure-ROI concentration or an averaged-spectrum fit.",
+                        "interpretation": (
+                            "Nominal overlap-weighted mean of per-voxel values; not a pure-ROI "
+                            "concentration, uncertainty of the ROI mean, or an averaged-spectrum fit."
+                        ),
                     }
                 )
     fields = ["branch", "roi", "metric", "overlap_weighted_voxel_estimate", "weighted_voxel_count", "minimum_overlap_threshold_percent", "interpretation"]

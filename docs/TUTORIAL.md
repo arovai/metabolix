@@ -90,9 +90,11 @@ The report includes pre/post coil-combination spectra and mean FID-magnitude QC,
 
 FreeSurfer `aseg.mgz` labels 10 and 49 denote left/right thalamus in this preset. Overlap is estimated by fine world-affine sampling, uses the entire nominal MRS voxel as denominator, and reports segmentation field-of-view coverage separately. It assumes existing scanner/world affines are aligned; no registration is performed. MRSI spatial response may spread signal beyond nominal boundaries.
 
-The ROI metabolite table is `roi/sub-11_desc-metabolix-roi-weighted_summary.tsv`
+The ROI weighted summary is `roi/sub-11_desc-metabolix-roi-weighted_summary.tsv`
 (with additional source entities when applicable). It contains separate raw and
-internal-reference weighted means per ROI, metabolite and processing branch.
+internal-reference weighted means per ROI, metabolite and processing branch,
+along with overlap-weighted means of available component CRLB-derived uncertainty,
+SNR and FWHM linewidth.
 Default ROI averaging includes all positive overlaps; `--minimum-overlap-percent`
 can restrict reporting, without restricting fitting. This averages fitted values,
 not spectra, and does not upsample MRS data. Internal values are ratios to the
@@ -120,7 +122,7 @@ metabolix "$BIDS_DIR" "$OUTPUT_DIR" group
 
 `group/group_summary.tsv` contains **one row per analysed participant**, keyed by
 `participant_id` (for example `sub-12`). It includes whole-grid statistics and,
-when available, the participant ROI metabolite summaries. There is no pooled
+when available, participant ROI metabolite and QC summaries. There is no pooled
 `GROUP` row. Session, acquisition, run and other non-subject entities, processing
 branches and ROIs are kept in separate columns, never silently averaged together.
 
