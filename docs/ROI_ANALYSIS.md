@@ -131,6 +131,8 @@ The ROI table includes raw/internal metabolite values and available component
 CRLB-derived uncertainty, SNR and FWHM linewidth metrics. QC flags do not exclude
 voxels from these means. A CRLB-derived value averaged across voxels is not
 uncertainty of an ROI mean, and uncertainty on metabolite ratios is not propagated.
+The component QC summaries are available starting with Metabolix 0.2.0; resuming
+a completed older run does not regenerate its ROI table.
 Use `qc/` voxel tables alongside ROI summaries to inspect individual voxel values
 and flags. See the [tutorial](TUTORIAL.md) for processing commands and
 [limitations](LIMITATIONS.md) for broader QC guidance.
